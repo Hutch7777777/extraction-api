@@ -1,5 +1,5 @@
 """
-Extraction API v2.4 - Fixed page updates
+Extraction API v2.5 - Fixed page_type validation
 """
 
 import os
@@ -27,6 +27,41 @@ BATCH_DELAY_SECONDS = 0.5
 PDF_CHUNK_SIZE = 5
 
 ROBOFLOW_WORKFLOW_URL = "https://serverless.roboflow.com/infer/workflows/exterior-finishes/find-windows-garages-exterior-walls-roofs-buildings-doors-and-gables"
+
+# Valid page types - MUST match database constraint exactly
+VALID_PAGE_TYPES = {'elevation', 'schedule', 'floor_plan', 'section', 'detail', 'cover', 'site_plan', 'other'}
+
+
+def normalize_page_type(raw_type):
+    """Ensure page_type matches database constraint"""
+    if not raw_type or not isinstance(raw_type, str):
+        return 'other'
+    
+    cleaned = raw_type.lower().strip()
+    
+    # Direct match
+    if cleaned in VALID_PAGE_TYPES:
+        return cleaned
+    
+    # Common variations
+    mappings = {
+        'floorplan': 'floor_plan',
+        'floor plan': 'floor_plan',
+        'siteplan': 'site_plan',
+        'site plan': 'site_plan',
+        'unknown': 'other',
+        'title': 'cover',
+        'title sheet': 'cover',
+        'general': 'other',
+        'notes': 'other',
+        'specifications': 'other',
+        'spec': 'other',
+    }
+    
+    if cleaned in mappings:
+        return mappings[cleaned]
+    
+    return 'other'
 
 
 def supabase_request(method, endpoint, data=None, filters=None):
@@ -79,7 +114,7 @@ def update_job(job_id, updates):
 def update_page(page_id, updates):
     result = supabase_request('PATCH', 'extraction_pages', updates, {'id': f'eq.{page_id}'})
     if not result:
-        print(f"FAILED to update page {page_id}", flush=True)
+        print(f"FAILED update page {page_id} with {updates}", flush=True)
     return result
 
 
@@ -130,8 +165,19 @@ def classify_page_with_claude(image_url):
     try:
         response = requests.get(image_url, timeout=30)
         image_base64 = base64.b64encode(response.content).decode('utf-8')
-        prompt = """Classify this architectural drawing. Return ONLY JSON:
-{"page_type": "elevation"|"schedule"|"floor_plan"|"section"|"detail"|"cover"|"site_plan"|"other", "confidence": 0.0-1.0, "elevation_name": "front"|"rear"|"left"|"right"|null, "contains_schedule": true|false, "schedule_type": "window"|"door"|"window_and_door"|null, "notes": "brief description"}"""
+        prompt = """Classify this architectural drawing. Return ONLY valid JSON with these exact field names and values:
+
+{
+  "page_type": "elevation" or "schedule" or "floor_plan" or "section" or "detail" or "cover" or "site_plan" or "other",
+  "confidence": 0.0 to 1.0,
+  "elevation_name": "front" or "rear" or "left" or "right" or null,
+  "contains_schedule": true or false,
+  "schedule_type": "window" or "door" or "window_and_door" or null,
+  "notes": "brief description"
+}
+
+IMPORTANT: page_type MUST be exactly one of: elevation, schedule, floor_plan, section, detail, cover, site_plan, other"""
+
         api_response = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
@@ -143,9 +189,13 @@ def classify_page_with_claude(image_url):
             text = api_response.json()['content'][0]['text']
             json_match = re.search(r'\{.*\}', text, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
+                result = json.loads(json_match.group())
+                # Normalize page_type to ensure it's valid
+                result['page_type'] = normalize_page_type(result.get('page_type'))
+                return result
         return {"page_type": "other", "confidence": 0}
     except Exception as e:
+        print(f"Claude classify error: {e}", flush=True)
         return {"page_type": "other", "confidence": 0, "error": str(e)}
 
 
@@ -239,32 +289,58 @@ def classify_job_background(job_id):
         update_job(job_id, {'status': 'classifying'})
         pages = supabase_request('GET', 'extraction_pages', filters={'job_id': f'eq.{job_id}', 'status': 'eq.pending', 'order': 'page_number'})
         if not pages:
-            print(f"[{job_id}] No pages!", flush=True)
+            print(f"[{job_id}] No pending pages found!", flush=True)
             return
-        print(f"[{job_id}] {len(pages)} pages", flush=True)
+        print(f"[{job_id}] Found {len(pages)} pages to classify", flush=True)
+        
         elevation_count = schedule_count = floor_plan_count = other_count = 0
+        
         for i, page in enumerate(pages):
             page_id = page.get('id')
             page_num = page.get('page_number', i+1)
             image_url = page.get('image_url')
-            print(f"[{job_id}] Page {page_num}...", flush=True)
+            
+            print(f"[{job_id}] Classifying page {page_num}...", flush=True)
+            
             classification = classify_page_with_claude(image_url)
-            page_type = classification.get('page_type', 'other')
+            
+            # Normalize and validate page_type
+            raw_type = classification.get('page_type')
+            page_type = normalize_page_type(raw_type)
             confidence = classification.get('confidence', 0)
             elevation_name = classification.get('elevation_name')
-            print(f"[{job_id}] Page {page_num}: {page_type}", flush=True)
+            
+            print(f"[{job_id}] Page {page_num}: raw='{raw_type}' -> normalized='{page_type}'", flush=True)
+            
             if page_type == 'elevation': elevation_count += 1
             elif page_type == 'schedule': schedule_count += 1
             elif page_type == 'floor_plan': floor_plan_count += 1
             else: other_count += 1
-            update_page(page_id, {'page_type': page_type, 'page_type_confidence': confidence, 'elevation_name': elevation_name, 'status': 'classified'})
+            
+            # Build update - only include elevation_name if not None
+            update_data = {
+                'page_type': page_type,
+                'page_type_confidence': confidence,
+                'status': 'classified'
+            }
+            if elevation_name:
+                update_data['elevation_name'] = elevation_name
+            
+            result = update_page(page_id, update_data)
+            if result:
+                print(f"[{job_id}] Updated page {page_num} OK", flush=True)
+            else:
+                print(f"[{job_id}] FAILED page {page_num}", flush=True)
+            
             update_job(job_id, {'pages_classified': i + 1})
+            
             if (i + 1) % MAX_CONCURRENT_CLAUDE == 0:
                 time.sleep(BATCH_DELAY_SECONDS)
+        
         update_job(job_id, {'status': 'classified', 'elevation_count': elevation_count, 'schedule_count': schedule_count, 'floor_plan_count': floor_plan_count, 'other_count': other_count})
-        print(f"[{job_id}] Done! E:{elevation_count} S:{schedule_count} F:{floor_plan_count} O:{other_count}", flush=True)
+        print(f"[{job_id}] Classification complete! E:{elevation_count} S:{schedule_count} F:{floor_plan_count} O:{other_count}", flush=True)
     except Exception as e:
-        print(f"[{job_id}] Error: {e}", flush=True)
+        print(f"[{job_id}] Classification error: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
 
 
@@ -274,9 +350,12 @@ def process_job_background(job_id, scale_config=None):
         update_job(job_id, {'status': 'processing'})
         pages = supabase_request('GET', 'extraction_pages', filters={'job_id': f'eq.{job_id}', 'status': 'eq.classified', 'order': 'page_number'})
         if not pages:
+            print(f"[{job_id}] No classified pages found!", flush=True)
             return
         elevation_pages = [p for p in pages if p.get('page_type') == 'elevation']
         schedule_pages = [p for p in pages if p.get('page_type') == 'schedule']
+        print(f"[{job_id}] Found {len(elevation_pages)} elevations, {len(schedule_pages)} schedules", flush=True)
+        
         totals = {'total_net_siding_sqft': 0, 'total_gross_wall_sqft': 0, 'total_windows': 0, 'total_doors': 0}
         processed = 0
         for page in elevation_pages:
@@ -307,14 +386,16 @@ def process_job_background(job_id, scale_config=None):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy", "version": "2.4", "services": {"roboflow": bool(ROBOFLOW_API_KEY), "anthropic": bool(ANTHROPIC_API_KEY), "supabase": bool(SUPABASE_KEY)}})
+    return jsonify({"status": "healthy", "version": "2.5", "services": {"roboflow": bool(ROBOFLOW_API_KEY), "anthropic": bool(ANTHROPIC_API_KEY), "supabase": bool(SUPABASE_KEY)}})
 
 @app.route('/classify-page', methods=['POST'])
 def classify_page_endpoint():
     data = request.json
     if not data.get('image_url'):
         return jsonify({"error": "image_url required"}), 400
-    return jsonify(classify_page_with_claude(data['image_url']))
+    result = classify_page_with_claude(data['image_url'])
+    result['page_type'] = normalize_page_type(result.get('page_type'))
+    return jsonify(result)
 
 @app.route('/start-job', methods=['POST'])
 def start_job():
@@ -363,9 +444,10 @@ def list_jobs():
 
 @app.route('/test-update', methods=['POST'])
 def test_update():
+    """Test with valid page_type"""
     data = request.json
     page_id = data.get('page_id')
-    result = update_page(page_id, {'page_type': 'test', 'status': 'classified'})
+    result = update_page(page_id, {'page_type': 'other', 'status': 'classified'})
     return jsonify({"success": bool(result), "result": result})
 
 if __name__ == '__main__':
