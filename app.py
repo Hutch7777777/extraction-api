@@ -429,24 +429,29 @@ def generate_markups_for_page(page_id, trades=None):
     
     markup_urls = {}
     
+    errors = []
     for trade in trades:
         try:
             trade_filter = TRADE_GROUPS.get(trade, TRADE_GROUPS['all'])
+            print(f"Generating {trade} markup, filter={trade_filter}, preds={len(predictions)}", flush=True)
             
             # Generate markup
             marked_img, totals = generate_markup_image(
                 image_data, predictions, scale_ratio, dpi,
                 trade_filter=trade_filter, show_dimensions=True, show_labels=True
             )
+            print(f"Generated image, totals={totals}", flush=True)
             
             # Save to buffer
             buffer = BytesIO()
             marked_img.save(buffer, format='PNG', optimize=True)
             buffer.seek(0)
+            print(f"Saved to buffer, size={len(buffer.getvalue())}", flush=True)
             
             # Upload to Supabase
             filename = f"{job_id}/markup_{page_num:03d}_{trade}.png"
             markup_url = upload_to_supabase(buffer.getvalue(), filename, 'image/png')
+            print(f"Upload result: {markup_url}", flush=True)
             
             if markup_url:
                 markup_urls[trade] = {
@@ -454,11 +459,15 @@ def generate_markups_for_page(page_id, trades=None):
                     'totals': totals
                 }
             else:
-                print(f"Failed to upload markup for {trade}", flush=True)
+                errors.append(f"Upload failed for {trade}")
         except Exception as e:
-            print(f"Error generating markup for {trade}: {e}", flush=True)
             import traceback
-            traceback.print_exc()
+            err = traceback.format_exc()
+            print(f"Error: {err}", flush=True)
+            errors.append(f"{trade}: {str(e)}")
+    
+    if errors:
+        print(f"Markup errors: {errors}", flush=True)
     
     # Update page with markup URLs
     update_page(page_id, {
