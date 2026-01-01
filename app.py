@@ -118,25 +118,11 @@ def calculate_derived_measurements(width_in, height_in, qty, element_type='windo
 
 def generate_markup_image(image_data, predictions, scale_ratio, dpi=DEFAULT_DPI, 
                           trade_filter=None, show_dimensions=True, show_labels=True):
-    """
-    Generate marked-up image with bounding boxes and measurements
-    
-    Args:
-        image_data: Raw image bytes
-        predictions: Roboflow detection results
-        scale_ratio: Scale for real-world measurements
-        dpi: Image DPI
-        trade_filter: List of classes to include, or None for all
-        show_dimensions: Show dimension labels
-        show_labels: Show class labels
-    
-    Returns:
-        PIL Image with markups
-    """
+    """Generate marked-up image with bounding boxes and measurements"""
     img = Image.open(BytesIO(image_data)).convert('RGB')
     draw = ImageDraw.Draw(img)
     
-    # Try to load a font, fall back to default
+    # Try to load font
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
         small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
@@ -144,18 +130,15 @@ def generate_markup_image(image_data, predictions, scale_ratio, dpi=DEFAULT_DPI,
         font = ImageFont.load_default()
         small_font = font
     
-    # Calculate conversion factor
     if not scale_ratio or scale_ratio <= 0:
         scale_ratio = 48
     inches_per_pixel = (1.0 / dpi) * scale_ratio
     
-    # Filter predictions by trade if specified
     if trade_filter:
         filtered_preds = [p for p in predictions if p.get('class', '').lower() in trade_filter]
     else:
         filtered_preds = predictions
     
-    # Track totals for summary
     totals = {}
     
     for pred in filtered_preds:
@@ -164,97 +147,60 @@ def generate_markup_image(image_data, predictions, scale_ratio, dpi=DEFAULT_DPI,
         y = pred.get('y', 0)
         width = pred.get('width', 0)
         height = pred.get('height', 0)
-        confidence = pred.get('confidence', 0)
         
-        # Calculate bounding box corners
         x1 = int(x - width / 2)
         y1 = int(y - height / 2)
         x2 = int(x + width / 2)
         y2 = int(y + height / 2)
         
-        # Get color for this class
         color = MARKUP_COLORS.get(class_name, (128, 128, 128))
         
-        # Calculate real dimensions
         real_width_in = width * inches_per_pixel
         real_height_in = height * inches_per_pixel
-        real_width_ft = real_width_in / 12
-        real_height_ft = real_height_in / 12
         area_sqft = (real_width_in * real_height_in) / 144
         
-        # Track totals
         if class_name not in totals:
             totals[class_name] = {'count': 0, 'area_sqft': 0}
         totals[class_name]['count'] += 1
         totals[class_name]['area_sqft'] += area_sqft
         
-        # Draw based on element type
-        if class_name == 'building':
-            # Siding area - dashed green outline, thicker
-            for i in range(0, int(width + height) * 2, 10):
-                # Top edge
-                if i < width:
-                    draw.line([(x1 + i, y1), (min(x1 + i + 5, x2), y1)], fill=color, width=3)
-                # Right edge
-                elif i < width + height:
-                    offset = i - width
-                    draw.line([(x2, y1 + offset), (x2, min(y1 + offset + 5, y2))], fill=color, width=3)
-                # Bottom edge
-                elif i < width * 2 + height:
-                    offset = i - width - height
-                    draw.line([(x2 - offset, y2), (max(x2 - offset - 5, x1), y2)], fill=color, width=3)
-                # Left edge
-                else:
-                    offset = i - width * 2 - height
-                    draw.line([(x1, y2 - offset), (x1, max(y2 - offset - 5, y1))], fill=color, width=3)
-        elif class_name == 'roof':
-            # Roof - filled with transparency effect (hatching)
-            for i in range(y1, y2, 8):
-                draw.line([(x1, i), (x2, i)], fill=color + (100,), width=1)
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-        elif class_name == 'gable':
-            # Gable - triangle approximation
-            mid_x = (x1 + x2) // 2
-            draw.polygon([(mid_x, y1), (x1, y2), (x2, y2)], outline=color, fill=None)
-            draw.polygon([(mid_x, y1), (x1, y2), (x2, y2)], outline=color)
-        else:
-            # Windows, doors, garages - solid rectangle
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-            # Light fill
-            overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
-            overlay_draw = ImageDraw.Draw(overlay)
-            overlay_draw.rectangle([x1, y1, x2, y2], fill=color + (40,))
-            img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
-            draw = ImageDraw.Draw(img)
+        # Draw rectangle
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
         
         # Add label
         if show_labels:
             label = class_name.upper()
             if show_dimensions:
+                real_width_ft = real_width_in / 12
+                real_height_ft = real_height_in / 12
                 if real_width_ft >= 1:
-                    label += f"\n{real_width_ft:.1f}'×{real_height_ft:.1f}'"
+                    label += f" {real_width_ft:.1f}'x{real_height_ft:.1f}'"
                 else:
-                    label += f"\n{real_width_in:.0f}\"×{real_height_in:.0f}\""
+                    label += f" {real_width_in:.0f}x{real_height_in:.0f}"
                 if class_name in ['building', 'roof']:
-                    label += f"\n{area_sqft:.0f} SF"
+                    label += f" {area_sqft:.0f}SF"
             
-            # Background box for label
-            bbox = draw.textbbox((x1, y1 - 40), label, font=small_font)
-            draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill=(255, 255, 255, 200))
-            draw.text((x1, y1 - 40), label, fill=color, font=small_font)
+            # Simple label background
+            try:
+                bbox = draw.textbbox((x1, y1 - 35), label, font=small_font)
+                draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill=(255, 255, 255))
+                draw.text((x1, y1 - 35), label, fill=color, font=small_font)
+            except:
+                draw.text((x1, y1 - 20), label, fill=color)
     
-    # Add legend in top-left corner
+    # Legend
     legend_y = 10
-    draw.rectangle([5, 5, 180, 10 + len(totals) * 25 + 20], fill=(255, 255, 255, 230), outline=(0, 0, 0))
-    draw.text((10, legend_y), "MARKUP LEGEND", fill=(0, 0, 0), font=font)
-    legend_y += 20
-    
-    for class_name, data in totals.items():
-        color = MARKUP_COLORS.get(class_name, (128, 128, 128))
-        draw.rectangle([10, legend_y, 25, legend_y + 15], fill=color, outline=(0, 0, 0))
-        draw.text((30, legend_y), f"{class_name.upper()}: {data['count']} ({data['area_sqft']:.0f} SF)", 
-                  fill=(0, 0, 0), font=small_font)
-        legend_y += 20
+    try:
+        draw.rectangle([5, 5, 200, 20 + len(totals) * 22], fill=(255, 255, 255), outline=(0, 0, 0))
+        draw.text((10, legend_y), "MARKUP LEGEND", fill=(0, 0, 0), font=font)
+        legend_y += 18
+        for class_name, data in totals.items():
+            color = MARKUP_COLORS.get(class_name, (128, 128, 128))
+            draw.rectangle([10, legend_y, 25, legend_y + 12], fill=color)
+            draw.text((30, legend_y), f"{class_name.upper()}: {data['count']} ({data['area_sqft']:.0f}SF)", fill=(0, 0, 0), font=small_font)
+            legend_y += 18
+    except:
+        pass
     
     return img, totals
 
