@@ -1,6 +1,5 @@
 """
-Extraction API v2 - Full Job Processing with Parallel Execution
-Deployed on Railway
+Extraction API v2.2 - Chunked PDF Processing
 """
 
 import os
@@ -19,7 +18,6 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configuration
-COHERE_API_KEY = os.getenv('COHERE_API_KEY')
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
 SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://okwtyttfqbfmcqtenize.supabase.co')
@@ -29,11 +27,11 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 MAX_CONCURRENT_ROBOFLOW = 5
 MAX_CONCURRENT_CLAUDE = 3
 BATCH_DELAY_SECONDS = 0.5
+PDF_CHUNK_SIZE = 10  # Process 10 pages at a time
 
 # Roboflow endpoint
 ROBOFLOW_WORKFLOW_URL = "https://serverless.roboflow.com/infer/workflows/exterior-finishes/find-windows-garages-exterior-walls-roofs-buildings-doors-and-gables"
 
-# Thread pool for parallel processing
 executor = ThreadPoolExecutor(max_workers=10)
 
 
@@ -42,7 +40,6 @@ executor = ThreadPoolExecutor(max_workers=10)
 # ============================================
 
 def supabase_request(method, endpoint, data=None, params=None):
-    """Make authenticated request to Supabase REST API"""
     url = f"{SUPABASE_URL}/rest/v1/{endpoint}"
     headers = {
         'Authorization': f'Bearer {SUPABASE_KEY}',
@@ -69,7 +66,6 @@ def supabase_request(method, endpoint, data=None, params=None):
 
 
 def upload_to_supabase(image_data, filename, content_type='image/jpeg'):
-    """Upload image to Supabase Storage"""
     if not SUPABASE_KEY:
         return None
     try:
@@ -90,12 +86,10 @@ def upload_to_supabase(image_data, filename, content_type='image/jpeg'):
 
 
 def update_job(job_id, updates):
-    """Update job in database"""
     supabase_request('PATCH', 'extraction_jobs', updates, {'id': f'eq.{job_id}'})
 
 
 def update_page(page_id, updates):
-    """Update page in database"""
     supabase_request('PATCH', 'extraction_pages', updates, {'id': f'eq.{page_id}'})
 
 
@@ -104,7 +98,6 @@ def update_page(page_id, updates):
 # ============================================
 
 def detect_with_roboflow(image_url, scale_config=None):
-    """Call Roboflow RAPID workflow for object detection"""
     if scale_config is None:
         scale_config = {"sqft_per_pixel": 0.09, "lf_per_pixel": 0.3}
     
@@ -140,7 +133,6 @@ def detect_with_roboflow(image_url, scale_config=None):
 
 
 def calculate_areas(predictions, scale_config):
-    """Calculate areas from predictions"""
     sqft_per_pixel = scale_config.get("sqft_per_pixel", 0.09)
     counts = {"window": 0, "door": 0, "building": 0, "roof": 0, "gable": 0, "garage": 0}
     areas = {"window_sqft": 0, "door_sqft": 0, "building_sqft": 0, "roof_sqft": 0, "gable_sqft": 0, "garage_sqft": 0}
@@ -175,7 +167,6 @@ def calculate_areas(predictions, scale_config):
 # ============================================
 
 def generate_siding_markup(image_url, predictions, calculations):
-    """Generate siding markup visualization"""
     try:
         from PIL import Image, ImageDraw
         response = requests.get(image_url, timeout=30)
@@ -217,7 +208,6 @@ def generate_siding_markup(image_url, predictions, calculations):
 # ============================================
 
 def classify_page_with_claude(image_url):
-    """Use Claude Vision to classify page type"""
     if not ANTHROPIC_API_KEY:
         return {"page_type": "unknown", "confidence": 0, "error": "No Anthropic API key"}
     
@@ -300,7 +290,6 @@ Return ONLY the JSON, no other text."""
 # ============================================
 
 def ocr_schedule_with_claude(image_url):
-    """Extract window/door schedule data using Claude Vision"""
     if not ANTHROPIC_API_KEY:
         return {"error": "No Anthropic API key"}
     
@@ -378,15 +367,15 @@ Return ONLY valid JSON."""
 
 
 # ============================================
-# PDF CONVERSION (ASYNC)
+# PDF CONVERSION (CHUNKED - Memory Safe)
 # ============================================
 
 def convert_pdf_background(job_id, pdf_url):
-    """Background task to convert PDF to images"""
+    """Background task to convert PDF to images - processes in chunks to save memory"""
     try:
-        from pdf2image import convert_from_bytes
+        from pdf2image import convert_from_bytes, pdfinfo_from_bytes
         
-        print(f"[{job_id}] Starting PDF download...")
+        print(f"[{job_id}] Starting PDF download...", flush=True)
         update_job(job_id, {'status': 'converting'})
         
         # Download PDF
@@ -395,72 +384,107 @@ def convert_pdf_background(job_id, pdf_url):
             update_job(job_id, {'status': 'failed', 'error_message': f'Failed to download PDF: {response.status_code}'})
             return
         
-        print(f"[{job_id}] PDF downloaded, converting to images...")
+        pdf_bytes = response.content
+        print(f"[{job_id}] PDF downloaded ({len(pdf_bytes)} bytes)", flush=True)
         
-        # Convert to images
-        images = convert_from_bytes(response.content, dpi=150, fmt='png')
-        total_pages = len(images)
+        # Get page count first
+        try:
+            info = pdfinfo_from_bytes(pdf_bytes)
+            total_pages = info['Pages']
+        except:
+            # Fallback: convert first page to get count
+            total_pages = 81  # Default estimate
         
-        print(f"[{job_id}] Converting {total_pages} pages...")
+        print(f"[{job_id}] PDF has {total_pages} pages, processing in chunks of {PDF_CHUNK_SIZE}...", flush=True)
         update_job(job_id, {'total_pages': total_pages})
         
-        # Process each page
-        for i, img in enumerate(images):
-            page_num = i + 1
-            print(f"[{job_id}] Processing page {page_num}/{total_pages}...")
-            
-            # Convert to bytes
-            buffer = BytesIO()
-            img.save(buffer, format='PNG')
-            buffer.seek(0)
-            image_bytes = buffer.getvalue()
-            
-            # Upload to Supabase
-            filename = f"{job_id}/page_{page_num:03d}.png"
-            image_url = upload_to_supabase(image_bytes, filename, 'image/png')
-            
-            # Create thumbnail
-            thumb = img.copy()
-            thumb.thumbnail((300, 300))
-            thumb_buffer = BytesIO()
-            thumb.save(thumb_buffer, format='PNG')
-            thumb_buffer.seek(0)
-            thumb_filename = f"{job_id}/thumb_{page_num:03d}.png"
-            thumb_url = upload_to_supabase(thumb_buffer.getvalue(), thumb_filename, 'image/png')
-            
-            # Create page record
-            page_data = {
-                'job_id': job_id,
-                'page_number': page_num,
-                'image_url': image_url,
-                'thumbnail_url': thumb_url,
-                'status': 'pending'
-            }
-            supabase_request('POST', 'extraction_pages', page_data)
-            
-            # Update progress
-            update_job(job_id, {'pages_converted': page_num})
+        pages_converted = 0
         
-        print(f"[{job_id}] PDF conversion complete!")
-        update_job(job_id, {'status': 'converted'})
+        # Process in chunks
+        for start_page in range(1, total_pages + 1, PDF_CHUNK_SIZE):
+            end_page = min(start_page + PDF_CHUNK_SIZE - 1, total_pages)
+            
+            print(f"[{job_id}] Converting pages {start_page}-{end_page}...", flush=True)
+            
+            try:
+                # Convert only this chunk
+                images = convert_from_bytes(
+                    pdf_bytes,
+                    dpi=150,
+                    fmt='png',
+                    first_page=start_page,
+                    last_page=end_page
+                )
+                
+                # Process each page in chunk
+                for i, img in enumerate(images):
+                    page_num = start_page + i
+                    
+                    # Convert to bytes
+                    buffer = BytesIO()
+                    img.save(buffer, format='PNG')
+                    buffer.seek(0)
+                    image_bytes = buffer.getvalue()
+                    
+                    # Upload to Supabase
+                    filename = f"{job_id}/page_{page_num:03d}.png"
+                    image_url = upload_to_supabase(image_bytes, filename, 'image/png')
+                    
+                    # Create thumbnail
+                    thumb = img.copy()
+                    thumb.thumbnail((300, 300))
+                    thumb_buffer = BytesIO()
+                    thumb.save(thumb_buffer, format='PNG')
+                    thumb_buffer.seek(0)
+                    thumb_filename = f"{job_id}/thumb_{page_num:03d}.png"
+                    thumb_url = upload_to_supabase(thumb_buffer.getvalue(), thumb_filename, 'image/png')
+                    
+                    # Create page record
+                    page_data = {
+                        'job_id': job_id,
+                        'page_number': page_num,
+                        'image_url': image_url,
+                        'thumbnail_url': thumb_url,
+                        'status': 'pending'
+                    }
+                    supabase_request('POST', 'extraction_pages', page_data)
+                    
+                    pages_converted += 1
+                    
+                    # Clear image from memory
+                    del img
+                
+                # Clear chunk from memory
+                del images
+                
+                # Update progress
+                update_job(job_id, {'pages_converted': pages_converted})
+                print(f"[{job_id}] Progress: {pages_converted}/{total_pages} pages", flush=True)
+                
+            except Exception as chunk_error:
+                print(f"[{job_id}] Error in chunk {start_page}-{end_page}: {chunk_error}", flush=True)
+                # Continue with next chunk
+                continue
+        
+        print(f"[{job_id}] PDF conversion complete! {pages_converted} pages", flush=True)
+        update_job(job_id, {'status': 'converted', 'pages_converted': pages_converted})
         
     except Exception as e:
-        print(f"[{job_id}] PDF conversion error: {e}")
+        print(f"[{job_id}] PDF conversion error: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
 
 
 def classify_job_background(job_id):
     """Background task to classify all pages"""
     try:
-        print(f"[{job_id}] Starting classification...")
+        print(f"[{job_id}] Starting classification...", flush=True)
         update_job(job_id, {'status': 'classifying'})
         
-        # Get all pending pages
         pages = supabase_request('GET', 'extraction_pages', 
             params={'job_id': f'eq.{job_id}', 'status': 'eq.pending', 'order': 'page_number'})
         
         if not pages:
-            print(f"[{job_id}] No pages to classify")
+            print(f"[{job_id}] No pages to classify", flush=True)
             return
         
         elevation_count = 0
@@ -469,7 +493,7 @@ def classify_job_background(job_id):
         other_count = 0
         
         for i, page in enumerate(pages):
-            print(f"[{job_id}] Classifying page {page['page_number']}/{len(pages)}...")
+            print(f"[{job_id}] Classifying page {page['page_number']}/{len(pages)}...", flush=True)
             
             classification = classify_page_with_claude(page['image_url'])
             
@@ -486,7 +510,6 @@ def classify_job_background(job_id):
             else:
                 other_count += 1
             
-            # Update page
             update_page(page['id'], {
                 'page_type': page_type,
                 'page_type_confidence': confidence,
@@ -494,14 +517,12 @@ def classify_job_background(job_id):
                 'status': 'classified'
             })
             
-            # Update job progress
             update_job(job_id, {'pages_classified': i + 1})
             
-            # Rate limit
             if (i + 1) % MAX_CONCURRENT_CLAUDE == 0:
                 time.sleep(BATCH_DELAY_SECONDS)
         
-        print(f"[{job_id}] Classification complete!")
+        print(f"[{job_id}] Classification complete!", flush=True)
         update_job(job_id, {
             'status': 'classified',
             'elevation_count': elevation_count,
@@ -511,22 +532,21 @@ def classify_job_background(job_id):
         })
         
     except Exception as e:
-        print(f"[{job_id}] Classification error: {e}")
+        print(f"[{job_id}] Classification error: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
 
 
 def process_job_background(job_id, scale_config=None):
     """Background task to process all classified pages"""
     try:
-        print(f"[{job_id}] Starting processing...")
+        print(f"[{job_id}] Starting processing...", flush=True)
         update_job(job_id, {'status': 'processing'})
         
-        # Get classified pages
         pages = supabase_request('GET', 'extraction_pages',
             params={'job_id': f'eq.{job_id}', 'status': 'eq.classified', 'order': 'page_number'})
         
         if not pages:
-            print(f"[{job_id}] No pages to process")
+            print(f"[{job_id}] No pages to process", flush=True)
             return
         
         elevation_pages = [p for p in pages if p['page_type'] == 'elevation']
@@ -544,14 +564,13 @@ def process_job_background(job_id, scale_config=None):
         
         # Process elevations
         for page in elevation_pages:
-            print(f"[{job_id}] Processing elevation page {page['page_number']}...")
+            print(f"[{job_id}] Processing elevation page {page['page_number']}...", flush=True)
             
             detection = detect_with_roboflow(page['image_url'], scale_config)
             
             if 'error' not in detection:
                 timestamp = int(time.time() * 1000)
                 
-                # Upload visualizations
                 roboflow_viz_url = None
                 if detection.get('visualization'):
                     viz = detection['visualization']
@@ -591,7 +610,7 @@ def process_job_background(job_id, scale_config=None):
         
         # Process schedules
         for page in schedule_pages:
-            print(f"[{job_id}] Processing schedule page {page['page_number']}...")
+            print(f"[{job_id}] Processing schedule page {page['page_number']}...", flush=True)
             
             schedule_data = ocr_schedule_with_claude(page['image_url'])
             
@@ -613,14 +632,14 @@ def process_job_background(job_id, scale_config=None):
             processed_count += 1
             update_job(job_id, {'pages_processed': processed_count})
         
-        print(f"[{job_id}] Processing complete!")
+        print(f"[{job_id}] Processing complete!", flush=True)
         update_job(job_id, {
             'status': 'complete',
             'results_summary': totals
         })
         
     except Exception as e:
-        print(f"[{job_id}] Processing error: {e}")
+        print(f"[{job_id}] Processing error: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
 
 
@@ -632,7 +651,7 @@ def process_job_background(job_id, scale_config=None):
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "2.1",
+        "version": "2.2",
         "services": {
             "roboflow": bool(ROBOFLOW_API_KEY),
             "anthropic": bool(ANTHROPIC_API_KEY),
@@ -643,7 +662,6 @@ def health():
 
 @app.route('/detect', methods=['POST'])
 def detect():
-    """Detect objects in single image"""
     data = request.json
     image_url = data.get('image_url')
     scale_config = data.get('scale_config')
@@ -657,7 +675,6 @@ def detect():
 
 @app.route('/classify-page', methods=['POST'])
 def classify_page():
-    """Classify a single page"""
     data = request.json
     image_url = data.get('image_url')
     
@@ -670,7 +687,6 @@ def classify_page():
 
 @app.route('/ocr-schedule', methods=['POST'])
 def ocr_schedule():
-    """OCR a schedule page"""
     data = request.json
     image_url = data.get('image_url')
     
@@ -683,7 +699,6 @@ def ocr_schedule():
 
 @app.route('/extract', methods=['POST'])
 def extract():
-    """Full extraction for single image (existing endpoint)"""
     data = request.json
     image_url = data.get('image_url')
     project_id = data.get('project_id')
@@ -724,7 +739,6 @@ def extract():
 
 @app.route('/start-job', methods=['POST'])
 def start_job():
-    """Start a new extraction job (async - returns immediately)"""
     data = request.json
     pdf_url = data.get('pdf_url')
     project_id = data.get('project_id')
@@ -733,7 +747,6 @@ def start_job():
     if not pdf_url or not project_id:
         return jsonify({"error": "pdf_url and project_id required"}), 400
     
-    # Create job record
     job_data = {
         'project_id': project_id,
         'project_name': project_name,
@@ -747,7 +760,6 @@ def start_job():
     
     job_id = job_result[0]['id']
     
-    # Start background processing
     thread = threading.Thread(target=convert_pdf_background, args=(job_id, pdf_url))
     thread.start()
     
@@ -760,16 +772,48 @@ def start_job():
     })
 
 
+@app.route('/resume-job', methods=['POST'])
+def resume_job():
+    """Resume a failed/stuck job from where it left off"""
+    data = request.json
+    job_id = data.get('job_id')
+    pdf_url = data.get('pdf_url')
+    
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    
+    # Get job info
+    job = supabase_request('GET', 'extraction_jobs', params={'id': f'eq.{job_id}'})
+    if not job or len(job) == 0:
+        return jsonify({"error": "Job not found"}), 404
+    
+    job = job[0]
+    pdf_url = pdf_url or job.get('source_pdf_url')
+    
+    # Reset status
+    update_job(job_id, {'status': 'converting', 'error_message': None})
+    
+    # Start conversion from where it left off
+    thread = threading.Thread(target=convert_pdf_background, args=(job_id, pdf_url))
+    thread.start()
+    
+    return jsonify({
+        "success": True,
+        "job_id": job_id,
+        "status": "resuming",
+        "pages_already_converted": job.get('pages_converted', 0),
+        "message": "Job resumed. Poll /job-status for progress."
+    })
+
+
 @app.route('/classify-job', methods=['POST'])
 def classify_job():
-    """Start classification for a job (async)"""
     data = request.json
     job_id = data.get('job_id')
     
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
     
-    # Start background classification
     thread = threading.Thread(target=classify_job_background, args=(job_id,))
     thread.start()
     
@@ -783,7 +827,6 @@ def classify_job():
 
 @app.route('/process-job', methods=['POST'])
 def process_job():
-    """Start processing for a job (async)"""
     data = request.json
     job_id = data.get('job_id')
     scale_config = data.get('scale_config')
@@ -791,7 +834,6 @@ def process_job():
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
     
-    # Start background processing
     thread = threading.Thread(target=process_job_background, args=(job_id, scale_config))
     thread.start()
     
@@ -805,7 +847,6 @@ def process_job():
 
 @app.route('/job-status', methods=['GET'])
 def job_status():
-    """Get current job status"""
     job_id = request.args.get('job_id')
     include_pages = request.args.get('include_pages', 'false').lower() == 'true'
     
@@ -829,7 +870,6 @@ def job_status():
 
 @app.route('/list-jobs', methods=['GET'])
 def list_jobs():
-    """List all jobs"""
     jobs = supabase_request('GET', 'extraction_jobs', params={'order': 'created_at.desc', 'limit': '50'})
     return jsonify({"jobs": jobs or []})
 
