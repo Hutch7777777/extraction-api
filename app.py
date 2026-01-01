@@ -784,7 +784,7 @@ def build_cross_references(job_id):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy", "version": "3.5", "features": ["markups", "scale_extraction", "cross_reference"]})
+    return jsonify({"status": "healthy", "version": "3.6", "features": ["markups", "scale_extraction", "cross_reference"]})
 
 @app.route('/start-job', methods=['POST'])
 def start_job():
@@ -1462,7 +1462,7 @@ def analyze_floor_plan():
 def generate_comprehensive_markup(page_id):
     """
     Generate a single comprehensive markup image for an elevation.
-    Shows all detections with dimensions and a summary legend.
+    Shows all detections with tinted fills, dimensions and a summary legend.
     """
     from PIL import Image, ImageDraw, ImageFont
     import io
@@ -1501,8 +1501,11 @@ def generate_comprehensive_markup(page_id):
     if response.status_code != 200:
         return {"error": f"Failed to download image: {response.status_code}"}
     
-    img = Image.open(io.BytesIO(response.content)).convert('RGB')
-    draw = ImageDraw.Draw(img)
+    base_img = Image.open(io.BytesIO(response.content)).convert('RGBA')
+    
+    # Create overlay for transparent fills
+    overlay = Image.new('RGBA', base_img.size, (255, 255, 255, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
     
     # Try to load a font, fall back to default
     try:
@@ -1514,25 +1517,40 @@ def generate_comprehensive_markup(page_id):
         font_small = font
         font_large = font
     
-    # Color scheme
+    # Color scheme with RGB tuples for fills
     COLORS = {
-        'building': '#22C55E',      # Green
-        'exterior_wall': '#22C55E', # Green
-        'window': '#3B82F6',        # Blue
-        'door': '#F97316',          # Orange
-        'garage': '#A855F7',        # Purple
-        'roof': '#EF4444',          # Red
-        'gable': '#EC4899',         # Pink
+        'building': {'outline': '#22C55E', 'fill': (34, 197, 94, 60)},       # Green
+        'exterior_wall': {'outline': '#22C55E', 'fill': (34, 197, 94, 60)},  # Green
+        'window': {'outline': '#3B82F6', 'fill': (59, 130, 246, 80)},        # Blue
+        'door': {'outline': '#F97316', 'fill': (249, 115, 22, 80)},          # Orange
+        'garage': {'outline': '#A855F7', 'fill': (168, 85, 247, 80)},        # Purple
+        'roof': {'outline': '#EF4444', 'fill': (239, 68, 68, 50)},           # Red
+        'gable': {'outline': '#EC4899', 'fill': (236, 72, 153, 70)},         # Pink
     }
     
     # Count by class for legend
     class_counts = {}
     class_areas = {}
     
+    # Sort detections: draw larger items first (buildings), then smaller (windows/doors)
+    # This ensures windows/doors appear on top of buildings
+    def sort_key(det):
+        cls = det.get('class', '')
+        if cls in ['building', 'exterior_wall']:
+            return 0
+        elif cls == 'roof':
+            return 1
+        elif cls == 'gable':
+            return 2
+        else:
+            return 3
+    
+    sorted_detections = sorted(detections, key=sort_key)
+    
     # Draw each detection
-    for det in detections:
+    for det in sorted_detections:
         cls = det.get('class', 'unknown')
-        color = COLORS.get(cls, '#888888')
+        colors = COLORS.get(cls, {'outline': '#888888', 'fill': (136, 136, 136, 50)})
         
         # Get pixel coordinates
         px = float(det.get('pixel_x', 0))
@@ -1551,25 +1569,8 @@ def generate_comprehensive_markup(page_id):
         height_ft = float(det.get('real_height_ft', 0))
         area_sf = float(det.get('area_sf', 0))
         
-        # Draw bounding box
-        line_width = 3 if cls in ['building', 'exterior_wall'] else 2
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
-        
-        # Draw dimension label
-        if cls in ['window', 'door', 'garage']:
-            label = f"{width_ft:.1f}'x{height_ft:.1f}'"
-            # Position label inside box at top
-            label_y = y1 + 2
-            draw.text((x1 + 3, label_y), label, fill=color, font=font_small)
-        elif cls == 'gable':
-            label = f"{area_sf:.0f} SF"
-            draw.text((x1 + 3, y1 + 2), label, fill=color, font=font_small)
-        elif cls in ['building', 'exterior_wall']:
-            label = f"{area_sf:.0f} SF"
-            draw.text((x1 + 5, y1 + 5), label, fill=color, font=font)
-        elif cls == 'roof':
-            label = f"{area_sf:.0f} SF"
-            draw.text((x1 + 5, y1 + 5), label, fill=color, font=font)
+        # Draw filled rectangle with transparency
+        overlay_draw.rectangle([x1, y1, x2, y2], fill=colors['fill'], outline=colors['outline'], width=2)
         
         # Track counts and areas
         if cls not in class_counts:
@@ -1578,44 +1579,88 @@ def generate_comprehensive_markup(page_id):
         class_counts[cls] += 1
         class_areas[cls] += area_sf
     
-    # Draw legend box in top-left
+    # Composite overlay onto base image
+    img = Image.alpha_composite(base_img, overlay)
+    
+    # Create another overlay for labels (so they're on top of fills)
+    label_overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
+    label_draw = ImageDraw.Draw(label_overlay)
+    
+    # Draw labels on top
+    for det in sorted_detections:
+        cls = det.get('class', 'unknown')
+        colors = COLORS.get(cls, {'outline': '#888888', 'fill': (136, 136, 136, 50)})
+        
+        px = float(det.get('pixel_x', 0))
+        py = float(det.get('pixel_y', 0))
+        pw = float(det.get('pixel_width', 0))
+        ph = float(det.get('pixel_height', 0))
+        
+        x1 = px - pw/2
+        y1 = py - ph/2
+        
+        width_ft = float(det.get('real_width_ft', 0))
+        height_ft = float(det.get('real_height_ft', 0))
+        area_sf = float(det.get('area_sf', 0))
+        
+        # Draw dimension label with background for readability
+        if cls in ['window', 'door', 'garage']:
+            label = f"{width_ft:.1f}'x{height_ft:.1f}'"
+            label_x = x1 + 3
+            label_y = y1 + 2
+            # Draw label background
+            bbox = label_draw.textbbox((label_x, label_y), label, font=font_small)
+            label_draw.rectangle([bbox[0]-2, bbox[1]-1, bbox[2]+2, bbox[3]+1], fill=(255, 255, 255, 200))
+            label_draw.text((label_x, label_y), label, fill=colors['outline'], font=font_small)
+        elif cls in ['building', 'exterior_wall', 'roof', 'gable']:
+            label = f"{area_sf:.0f} SF"
+            label_x = x1 + 5
+            label_y = y1 + 5
+            bbox = label_draw.textbbox((label_x, label_y), label, font=font)
+            label_draw.rectangle([bbox[0]-2, bbox[1]-1, bbox[2]+2, bbox[3]+1], fill=(255, 255, 255, 220))
+            label_draw.text((label_x, label_y), label, fill=colors['outline'], font=font)
+    
+    # Composite labels
+    img = Image.alpha_composite(img, label_overlay)
+    
+    # Draw legend box
     legend_x = 10
     legend_y = 10
     legend_width = 280
-    legend_height = 220
+    legend_height = 230
     
-    # Semi-transparent background
-    overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    overlay_draw.rectangle([legend_x, legend_y, legend_x + legend_width, legend_y + legend_height], 
-                           fill=(255, 255, 255, 230))
-    img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+    legend_overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
+    legend_draw = ImageDraw.Draw(legend_overlay)
+    legend_draw.rectangle([legend_x, legend_y, legend_x + legend_width, legend_y + legend_height], 
+                          fill=(255, 255, 255, 240), outline=(0, 0, 0, 255), width=2)
+    
+    img = Image.alpha_composite(img, legend_overlay)
     draw = ImageDraw.Draw(img)
     
     # Legend title
     title = f"ELEVATION: {elevation_name.upper() if elevation_name else 'UNKNOWN'}"
-    draw.text((legend_x + 10, legend_y + 5), title, fill='#000000', font=font_large)
+    draw.text((legend_x + 10, legend_y + 8), title, fill='#000000', font=font_large)
     
     # Legend items
-    y_offset = legend_y + 30
-    line_height = 18
+    y_offset = legend_y + 35
+    line_height = 20
     
-    for cls, color in COLORS.items():
-        if cls in class_counts:
-            count = class_counts[cls]
-            area = class_areas[cls]
-            label = f"{cls.replace('_', ' ').title()}: {count} ({area:.0f} SF)"
+    for cls_name, colors in COLORS.items():
+        if cls_name in class_counts:
+            count = class_counts[cls_name]
+            area = class_areas[cls_name]
+            label = f"{cls_name.replace('_', ' ').title()}: {count} ({area:.0f} SF)"
             
-            # Color box
-            draw.rectangle([legend_x + 10, y_offset, legend_x + 25, y_offset + 12], 
-                          fill=color, outline='#000000')
-            draw.text((legend_x + 32, y_offset - 2), label, fill='#000000', font=font_small)
+            # Color box with fill
+            draw.rectangle([legend_x + 10, y_offset, legend_x + 28, y_offset + 14], 
+                          fill=colors['outline'], outline='#000000')
+            draw.text((legend_x + 35, y_offset - 2), label, fill='#000000', font=font_small)
             y_offset += line_height
     
     # Summary calculations
-    y_offset += 10
-    draw.line([(legend_x + 10, y_offset), (legend_x + legend_width - 10, y_offset)], fill='#000000', width=1)
     y_offset += 8
+    draw.line([(legend_x + 10, y_offset), (legend_x + legend_width - 10, y_offset)], fill='#000000', width=1)
+    y_offset += 10
     
     gross_facade = float(calc.get('gross_facade_sf', 0))
     openings = float(calc.get('total_openings_sf', 0))
@@ -1630,9 +1675,12 @@ def generate_comprehensive_markup(page_id):
     y_offset += line_height
     draw.text((legend_x + 10, y_offset), f"= NET SIDING: {net_siding:.0f} SF", fill='#000000', font=font_large)
     
+    # Convert to RGB for saving
+    final_img = img.convert('RGB')
+    
     # Save to buffer
     buffer = io.BytesIO()
-    img.save(buffer, format='PNG', quality=95)
+    final_img.save(buffer, format='PNG', quality=95)
     buffer.seek(0)
     
     # Upload to Supabase
@@ -1667,6 +1715,7 @@ def generate_comprehensive_markup(page_id):
         }
     else:
         return {"error": f"Upload failed: {upload_response.status_code}"}
+
 
 
 @app.route('/comprehensive-markup', methods=['POST'])
