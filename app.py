@@ -1,5 +1,5 @@
 """
-Extraction API v3.1 - Cross-Reference & Derived Measurements
+Extraction API v3.2 - Visual Markups for All Trades
 """
 
 import os
@@ -13,6 +13,7 @@ import re
 from io import BytesIO
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
 
@@ -31,6 +32,26 @@ DEFAULT_DPI = 100
 ROBOFLOW_WORKFLOW_URL = "https://serverless.roboflow.com/infer/workflows/exterior-finishes/find-windows-garages-exterior-walls-roofs-buildings-doors-and-gables"
 
 VALID_PAGE_TYPES = {'elevation', 'schedule', 'floor_plan', 'section', 'detail', 'cover', 'site_plan', 'other'}
+
+# Markup colors (RGB)
+MARKUP_COLORS = {
+    'window': (0, 120, 255),      # Blue
+    'door': (255, 140, 0),        # Orange
+    'garage': (148, 0, 211),      # Purple
+    'building': (34, 139, 34),    # Green (siding area)
+    'roof': (220, 20, 60),        # Red
+    'gable': (255, 105, 180),     # Pink
+    'gutter': (0, 255, 255),      # Cyan
+}
+
+TRADE_GROUPS = {
+    'siding': ['building', 'window', 'door', 'garage'],
+    'roofing': ['roof', 'gable'],
+    'windows': ['window'],
+    'doors': ['door', 'garage'],
+    'gutters': ['roof'],  # Gutters follow roof edges
+    'all': ['window', 'door', 'garage', 'building', 'roof', 'gable']
+}
 
 
 def parse_scale_notation(notation):
@@ -58,13 +79,6 @@ def parse_scale_notation(notation):
     if match:
         return float(match.group(1))
     
-    simple_frac = r'(\d+)/(\d+)\s*(?:SCALE|=)'
-    match = re.search(simple_frac, notation)
-    if match:
-        numerator = float(match.group(1))
-        denominator = float(match.group(2))
-        return 12 / (numerator / denominator)
-    
     return None
 
 
@@ -78,13 +92,11 @@ def normalize_page_type(raw_type):
         'floorplan': 'floor_plan', 'floor plan': 'floor_plan',
         'siteplan': 'site_plan', 'site plan': 'site_plan',
         'unknown': 'other', 'title': 'cover', 'title sheet': 'cover',
-        'general': 'other', 'notes': 'other', 'specifications': 'other', 'spec': 'other',
     }
     return mappings.get(cleaned, 'other')
 
 
 def calculate_derived_measurements(width_in, height_in, qty, element_type='window'):
-    """Calculate all derived measurements for an opening"""
     measurements = {
         'head_trim_lf': round((width_in * qty) / 12, 2),
         'jamb_trim_lf': round((height_in * 2 * qty) / 12, 2),
@@ -95,114 +107,156 @@ def calculate_derived_measurements(width_in, height_in, qty, element_type='windo
         'area_sf': round((width_in * height_in * qty) / 144, 2),
         'perimeter_lf': round(((width_in * 2) + (height_in * 2)) * qty / 12, 2),
     }
-    
     if element_type == 'window':
         measurements['sill_trim_lf'] = round((width_in * qty) / 12, 2)
         measurements['sill_pan_lf'] = round((width_in + 4) * qty / 12, 2)
     else:
         measurements['sill_trim_lf'] = 0
         measurements['sill_pan_lf'] = 0
-    
     return measurements
 
 
-def calculate_real_measurements(predictions, scale_ratio, dpi=DEFAULT_DPI):
+def generate_markup_image(image_data, predictions, scale_ratio, dpi=DEFAULT_DPI, 
+                          trade_filter=None, show_dimensions=True, show_labels=True):
+    """
+    Generate marked-up image with bounding boxes and measurements
+    
+    Args:
+        image_data: Raw image bytes
+        predictions: Roboflow detection results
+        scale_ratio: Scale for real-world measurements
+        dpi: Image DPI
+        trade_filter: List of classes to include, or None for all
+        show_dimensions: Show dimension labels
+        show_labels: Show class labels
+    
+    Returns:
+        PIL Image with markups
+    """
+    img = Image.open(BytesIO(image_data)).convert('RGB')
+    draw = ImageDraw.Draw(img)
+    
+    # Try to load a font, fall back to default
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+    except:
+        font = ImageFont.load_default()
+        small_font = font
+    
+    # Calculate conversion factor
     if not scale_ratio or scale_ratio <= 0:
         scale_ratio = 48
-        scale_warning = "Using default scale 1/4\"=1'-0\""
+    inches_per_pixel = (1.0 / dpi) * scale_ratio
+    
+    # Filter predictions by trade if specified
+    if trade_filter:
+        filtered_preds = [p for p in predictions if p.get('class', '').lower() in trade_filter]
     else:
-        scale_warning = None
+        filtered_preds = predictions
     
-    inches_per_pixel = 1.0 / dpi
-    real_inches_per_pixel = inches_per_pixel * scale_ratio
-    sqft_per_sq_pixel = (real_inches_per_pixel ** 2) / 144
+    # Track totals for summary
+    totals = {}
     
-    results = {
-        'scale_used': scale_ratio,
-        'scale_warning': scale_warning,
-        'dpi': dpi,
-        'conversion': {
-            'inches_per_pixel': round(inches_per_pixel, 6),
-            'real_inches_per_pixel': round(real_inches_per_pixel, 4),
-            'sqft_per_sq_pixel': round(sqft_per_sq_pixel, 6)
-        },
-        'items': {'windows': [], 'doors': [], 'garages': [], 'buildings': [], 'roofs': [], 'gables': []},
-        'counts': {'window': 0, 'door': 0, 'garage': 0, 'building': 0, 'roof': 0, 'gable': 0},
-        'areas': {
-            'window_sqft': 0, 'door_sqft': 0, 'garage_sqft': 0,
-            'building_sqft': 0, 'roof_sqft': 0, 'gable_sqft': 0,
-            'gross_wall_sqft': 0, 'net_siding_sqft': 0, 'openings_sqft': 0
-        }
-    }
-    
-    for pred in predictions:
+    for pred in filtered_preds:
         class_name = pred.get('class', '').lower()
-        width_px = pred.get('width', 0)
-        height_px = pred.get('height', 0)
-        x, y = pred.get('x', 0), pred.get('y', 0)
+        x = pred.get('x', 0)
+        y = pred.get('y', 0)
+        width = pred.get('width', 0)
+        height = pred.get('height', 0)
+        confidence = pred.get('confidence', 0)
         
-        width_inches = width_px * real_inches_per_pixel
-        height_inches = height_px * real_inches_per_pixel
-        area_sqft = width_px * height_px * sqft_per_sq_pixel
+        # Calculate bounding box corners
+        x1 = int(x - width / 2)
+        y1 = int(y - height / 2)
+        x2 = int(x + width / 2)
+        y2 = int(y + height / 2)
         
-        item = {
-            'width_inches': round(width_inches, 1),
-            'height_inches': round(height_inches, 1),
-            'width_ft': round(width_inches / 12, 2),
-            'height_ft': round(height_inches / 12, 2),
-            'area_sqft': round(area_sqft, 1),
-            'perimeter_lf': round((width_inches + height_inches) * 2 / 12, 1),
-            'pixel_width': width_px,
-            'pixel_height': height_px,
-            'pixel_x': x,
-            'pixel_y': y,
-            'confidence': pred.get('confidence', 0),
-            'tag': None  # Will be filled by tag detection
-        }
+        # Get color for this class
+        color = MARKUP_COLORS.get(class_name, (128, 128, 128))
         
-        if class_name == 'window':
-            results['items']['windows'].append(item)
-            results['counts']['window'] += 1
-            results['areas']['window_sqft'] += area_sqft
-        elif class_name == 'door':
-            results['items']['doors'].append(item)
-            results['counts']['door'] += 1
-            results['areas']['door_sqft'] += area_sqft
-        elif class_name == 'garage':
-            results['items']['garages'].append(item)
-            results['counts']['garage'] += 1
-            results['areas']['garage_sqft'] += area_sqft
-        elif class_name == 'building':
-            results['items']['buildings'].append(item)
-            results['counts']['building'] += 1
-            results['areas']['building_sqft'] += area_sqft
+        # Calculate real dimensions
+        real_width_in = width * inches_per_pixel
+        real_height_in = height * inches_per_pixel
+        real_width_ft = real_width_in / 12
+        real_height_ft = real_height_in / 12
+        area_sqft = (real_width_in * real_height_in) / 144
+        
+        # Track totals
+        if class_name not in totals:
+            totals[class_name] = {'count': 0, 'area_sqft': 0}
+        totals[class_name]['count'] += 1
+        totals[class_name]['area_sqft'] += area_sqft
+        
+        # Draw based on element type
+        if class_name == 'building':
+            # Siding area - dashed green outline, thicker
+            for i in range(0, int(width + height) * 2, 10):
+                # Top edge
+                if i < width:
+                    draw.line([(x1 + i, y1), (min(x1 + i + 5, x2), y1)], fill=color, width=3)
+                # Right edge
+                elif i < width + height:
+                    offset = i - width
+                    draw.line([(x2, y1 + offset), (x2, min(y1 + offset + 5, y2))], fill=color, width=3)
+                # Bottom edge
+                elif i < width * 2 + height:
+                    offset = i - width - height
+                    draw.line([(x2 - offset, y2), (max(x2 - offset - 5, x1), y2)], fill=color, width=3)
+                # Left edge
+                else:
+                    offset = i - width * 2 - height
+                    draw.line([(x1, y2 - offset), (x1, max(y2 - offset - 5, y1))], fill=color, width=3)
         elif class_name == 'roof':
-            results['items']['roofs'].append(item)
-            results['counts']['roof'] += 1
-            results['areas']['roof_sqft'] += area_sqft
+            # Roof - filled with transparency effect (hatching)
+            for i in range(y1, y2, 8):
+                draw.line([(x1, i), (x2, i)], fill=color + (100,), width=1)
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
         elif class_name == 'gable':
-            results['items']['gables'].append(item)
-            results['counts']['gable'] += 1
-            results['areas']['gable_sqft'] += area_sqft
+            # Gable - triangle approximation
+            mid_x = (x1 + x2) // 2
+            draw.polygon([(mid_x, y1), (x1, y2), (x2, y2)], outline=color, fill=None)
+            draw.polygon([(mid_x, y1), (x1, y2), (x2, y2)], outline=color)
+        else:
+            # Windows, doors, garages - solid rectangle
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+            # Light fill
+            overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            overlay_draw.rectangle([x1, y1, x2, y2], fill=color + (40,))
+            img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+            draw = ImageDraw.Draw(img)
+        
+        # Add label
+        if show_labels:
+            label = class_name.upper()
+            if show_dimensions:
+                if real_width_ft >= 1:
+                    label += f"\n{real_width_ft:.1f}'×{real_height_ft:.1f}'"
+                else:
+                    label += f"\n{real_width_in:.0f}\"×{real_height_in:.0f}\""
+                if class_name in ['building', 'roof']:
+                    label += f"\n{area_sqft:.0f} SF"
+            
+            # Background box for label
+            bbox = draw.textbbox((x1, y1 - 40), label, font=small_font)
+            draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill=(255, 255, 255, 200))
+            draw.text((x1, y1 - 40), label, fill=color, font=small_font)
     
-    results['areas']['gross_wall_sqft'] = round(results['areas']['building_sqft'], 1)
-    results['areas']['openings_sqft'] = round(
-        results['areas']['window_sqft'] + results['areas']['door_sqft'] + results['areas']['garage_sqft'], 1)
-    results['areas']['net_siding_sqft'] = round(
-        results['areas']['gross_wall_sqft'] - results['areas']['openings_sqft'], 1)
+    # Add legend in top-left corner
+    legend_y = 10
+    draw.rectangle([5, 5, 180, 10 + len(totals) * 25 + 20], fill=(255, 255, 255, 230), outline=(0, 0, 0))
+    draw.text((10, legend_y), "MARKUP LEGEND", fill=(0, 0, 0), font=font)
+    legend_y += 20
     
-    for key in results['areas']:
-        results['areas'][key] = round(results['areas'][key], 1)
+    for class_name, data in totals.items():
+        color = MARKUP_COLORS.get(class_name, (128, 128, 128))
+        draw.rectangle([10, legend_y, 25, legend_y + 15], fill=color, outline=(0, 0, 0))
+        draw.text((30, legend_y), f"{class_name.upper()}: {data['count']} ({data['area_sqft']:.0f} SF)", 
+                  fill=(0, 0, 0), font=small_font)
+        legend_y += 20
     
-    results['validation'] = []
-    for win in results['items']['windows']:
-        if win['width_inches'] > 180:
-            results['validation'].append(f"Window {win['width_inches']}\" wide seems too large")
-    for door in results['items']['doors']:
-        if door['height_inches'] > 144:
-            results['validation'].append(f"Door {door['height_inches']}\" tall seems too large")
-    
-    return results
+    return img, totals
 
 
 def supabase_request(method, endpoint, data=None, filters=None):
@@ -295,15 +349,12 @@ def classify_page_with_claude(image_url):
   "page_type": "elevation" | "schedule" | "floor_plan" | "section" | "detail" | "cover" | "site_plan" | "other",
   "confidence": 0.0 to 1.0,
   "elevation_name": "front" | "rear" | "left" | "right" | "north" | "south" | "east" | "west" | null,
-  "scale_notation": "exact scale text from drawing, e.g. 1/4\" = 1'-0\" or 1:48 or null if not found",
+  "scale_notation": "exact scale text from drawing or null",
   "scale_location": "where scale was found",
   "contains_schedule": true | false,
   "schedule_type": "window" | "door" | "window_and_door" | null,
   "notes": "brief description"
-}
-
-page_type MUST be exactly one of: elevation, schedule, floor_plan, section, detail, cover, site_plan, other
-Look carefully for scale notation in title block or near drawing title."""
+}"""
 
         api_response = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -323,7 +374,6 @@ Look carefully for scale notation in title block or near drawing title."""
                 return result
         return {"page_type": "other", "confidence": 0}
     except Exception as e:
-        print(f"Claude classify error: {e}", flush=True)
         return {"page_type": "other", "confidence": 0, "error": str(e)}
 
 
@@ -337,16 +387,10 @@ def ocr_schedule_with_claude(image_url):
 
 Return ONLY valid JSON:
 {
-  "windows": [
-    {"tag": "W1", "width_inches": 36, "height_inches": 48, "type": "DH", "qty": 4, "notes": "tempered glass"}
-  ],
-  "doors": [
-    {"tag": "D1", "width_inches": 36, "height_inches": 80, "type": "Entry", "qty": 1, "notes": "solid core"}
-  ],
-  "raw_text": "any additional schedule text"
-}
-
-Read ALL rows in the schedule table. Convert dimensions to inches (36" or 3'-0" both = 36 inches)."""
+  "windows": [{"tag": "W1", "width_inches": 36, "height_inches": 48, "type": "DH", "qty": 4, "notes": ""}],
+  "doors": [{"tag": "D1", "width_inches": 36, "height_inches": 80, "type": "Entry", "qty": 1, "notes": ""}],
+  "raw_text": "additional text"
+}"""
 
         api_response = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -364,236 +408,160 @@ Read ALL rows in the schedule table. Convert dimensions to inches (36" or 3'-0" 
         return {"error": str(e)}
 
 
-def build_cross_references(job_id):
-    """
-    Build cross-references between schedule data and elevation detections.
-    Calculate derived measurements for each opening.
-    """
-    print(f"[{job_id}] Building cross-references...", flush=True)
+def calculate_real_measurements(predictions, scale_ratio, dpi=DEFAULT_DPI):
+    if not scale_ratio or scale_ratio <= 0:
+        scale_ratio = 48
+        scale_warning = "Using default scale"
+    else:
+        scale_warning = None
     
-    # Get all schedule data for this job
-    schedule_pages = supabase_request('GET', 'extraction_pages', filters={
-        'job_id': f'eq.{job_id}',
-        'page_type': 'eq.schedule',
-        'status': 'eq.complete',
-        'order': 'page_number'
+    inches_per_pixel = 1.0 / dpi
+    real_inches_per_pixel = inches_per_pixel * scale_ratio
+    sqft_per_sq_pixel = (real_inches_per_pixel ** 2) / 144
+    
+    results = {
+        'scale_used': scale_ratio, 'scale_warning': scale_warning, 'dpi': dpi,
+        'items': {'windows': [], 'doors': [], 'garages': [], 'buildings': [], 'roofs': [], 'gables': []},
+        'counts': {'window': 0, 'door': 0, 'garage': 0, 'building': 0, 'roof': 0, 'gable': 0},
+        'areas': {'window_sqft': 0, 'door_sqft': 0, 'garage_sqft': 0, 'building_sqft': 0, 'roof_sqft': 0, 'gable_sqft': 0}
+    }
+    
+    for pred in predictions:
+        class_name = pred.get('class', '').lower()
+        width_px = pred.get('width', 0)
+        height_px = pred.get('height', 0)
+        
+        width_inches = width_px * real_inches_per_pixel
+        height_inches = height_px * real_inches_per_pixel
+        area_sqft = width_px * height_px * sqft_per_sq_pixel
+        
+        item = {
+            'width_inches': round(width_inches, 1), 'height_inches': round(height_inches, 1),
+            'area_sqft': round(area_sqft, 1), 'pixel_x': pred.get('x', 0), 'pixel_y': pred.get('y', 0),
+            'pixel_width': width_px, 'pixel_height': height_px, 'confidence': pred.get('confidence', 0)
+        }
+        
+        if class_name in results['items']:
+            results['items'][class_name + 's'].append(item)
+        if class_name in results['counts']:
+            results['counts'][class_name] += 1
+            results['areas'][class_name + '_sqft'] += area_sqft
+    
+    results['areas']['gross_wall_sqft'] = round(results['areas']['building_sqft'], 1)
+    results['areas']['openings_sqft'] = round(sum(results['areas'][k] for k in ['window_sqft', 'door_sqft', 'garage_sqft']), 1)
+    results['areas']['net_siding_sqft'] = round(results['areas']['gross_wall_sqft'] - results['areas']['openings_sqft'], 1)
+    
+    return results
+
+
+def generate_markups_for_page(page_id, trades=None):
+    """
+    Generate markup images for a single page
+    
+    Args:
+        page_id: UUID of the extraction_page
+        trades: List of trades to generate ['all', 'siding', 'roofing', 'windows', 'doors', 'gutters']
+    
+    Returns:
+        Dict with markup URLs
+    """
+    if trades is None:
+        trades = ['all']
+    
+    # Get page data
+    page = supabase_request('GET', 'extraction_pages', filters={'id': f'eq.{page_id}'})
+    if not page:
+        return {"error": "Page not found"}
+    page = page[0]
+    
+    image_url = page.get('image_url')
+    extraction_data = page.get('extraction_data', {})
+    predictions = extraction_data.get('raw_predictions', [])
+    scale_ratio = page.get('scale_ratio') or 48
+    dpi = page.get('dpi') or DEFAULT_DPI
+    job_id = page.get('job_id')
+    page_num = page.get('page_number')
+    
+    if not predictions:
+        return {"error": "No detection data for this page"}
+    
+    # Download original image
+    try:
+        response = requests.get(image_url, timeout=30)
+        image_data = response.content
+    except Exception as e:
+        return {"error": f"Failed to download image: {e}"}
+    
+    markup_urls = {}
+    
+    for trade in trades:
+        trade_filter = TRADE_GROUPS.get(trade, TRADE_GROUPS['all'])
+        
+        # Generate markup
+        marked_img, totals = generate_markup_image(
+            image_data, predictions, scale_ratio, dpi,
+            trade_filter=trade_filter, show_dimensions=True, show_labels=True
+        )
+        
+        # Save to buffer
+        buffer = BytesIO()
+        marked_img.save(buffer, format='PNG', optimize=True)
+        buffer.seek(0)
+        
+        # Upload to Supabase
+        filename = f"{job_id}/markup_{page_num:03d}_{trade}.png"
+        markup_url = upload_to_supabase(buffer.getvalue(), filename, 'image/png')
+        
+        if markup_url:
+            markup_urls[trade] = {
+                'url': markup_url,
+                'totals': totals
+            }
+    
+    # Update page with markup URLs
+    update_page(page_id, {
+        'markup_urls': markup_urls
     })
     
-    if not schedule_pages:
-        print(f"[{job_id}] No schedule pages found", flush=True)
-        return {"error": "No schedule data"}
+    return {"success": True, "page_id": page_id, "markups": markup_urls}
+
+
+def generate_markups_for_job(job_id, trades=None):
+    """Generate markups for all elevation pages in a job"""
+    if trades is None:
+        trades = ['all', 'siding', 'roofing']
     
-    # Aggregate all schedule items, de-duplicating by tag
-    windows_by_tag = {}
-    doors_by_tag = {}
+    print(f"[{job_id}] Generating markups...", flush=True)
     
-    for page in schedule_pages:
-        extraction_data = page.get('extraction_data', {})
-        page_id = page.get('id')
-        
-        for window in extraction_data.get('windows', []):
-            tag = window.get('tag', 'UNKNOWN')
-            if tag not in windows_by_tag:
-                windows_by_tag[tag] = {
-                    'tag': tag,
-                    'width_inches': window.get('width_inches', 0),
-                    'height_inches': window.get('height_inches', 0),
-                    'type': window.get('type', ''),
-                    'qty': window.get('qty', 1),
-                    'notes': window.get('notes', ''),
-                    'schedule_page_id': page_id
-                }
-            else:
-                # Update qty if higher (some schedules show totals)
-                if window.get('qty', 1) > windows_by_tag[tag]['qty']:
-                    windows_by_tag[tag]['qty'] = window.get('qty', 1)
-        
-        for door in extraction_data.get('doors', []):
-            tag = door.get('tag', 'UNKNOWN')
-            if tag not in doors_by_tag:
-                doors_by_tag[tag] = {
-                    'tag': tag,
-                    'width_inches': door.get('width_inches', 0),
-                    'height_inches': door.get('height_inches', 0),
-                    'type': door.get('type', ''),
-                    'qty': door.get('qty', 1),
-                    'notes': door.get('notes', ''),
-                    'schedule_page_id': page_id
-                }
-            else:
-                if door.get('qty', 1) > doors_by_tag[tag]['qty']:
-                    doors_by_tag[tag]['qty'] = door.get('qty', 1)
-    
-    print(f"[{job_id}] Found {len(windows_by_tag)} window types, {len(doors_by_tag)} door types", flush=True)
-    
-    # Get elevation detection counts
-    elevation_pages = supabase_request('GET', 'extraction_pages', filters={
+    # Get all elevation pages with extraction data
+    pages = supabase_request('GET', 'extraction_pages', filters={
         'job_id': f'eq.{job_id}',
         'page_type': 'eq.elevation',
         'status': 'eq.complete',
         'order': 'page_number'
     })
     
-    total_detected_windows = 0
-    total_detected_doors = 0
-    elevation_page_ids = []
+    if not pages:
+        return {"error": "No elevation pages found"}
     
-    for page in elevation_pages or []:
-        extraction_data = page.get('extraction_data', {})
-        measurements = extraction_data.get('measurements', {})
-        counts = measurements.get('counts', {})
-        total_detected_windows += counts.get('window', 0)
-        total_detected_doors += counts.get('door', 0)
-        elevation_page_ids.append(page.get('id'))
-    
-    print(f"[{job_id}] Detected on elevations: {total_detected_windows} windows, {total_detected_doors} doors", flush=True)
-    
-    # Clear existing cross-refs for this job
-    supabase_request('DELETE', 'extraction_cross_refs', filters={'job_id': f'eq.{job_id}'})
-    
-    # Create cross-reference entries with derived measurements
-    cross_refs = []
-    
-    # Windows
-    for tag, window in windows_by_tag.items():
-        derived = calculate_derived_measurements(
-            window['width_inches'],
-            window['height_inches'],
-            window['qty'],
-            'window'
-        )
+    results = []
+    for page in pages:
+        page_id = page.get('id')
+        page_num = page.get('page_number')
+        print(f"[{job_id}] Marking up page {page_num}...", flush=True)
         
-        cross_ref = {
-            'job_id': job_id,
-            'element_type': 'window',
-            'tag': tag,
-            'schedule_width': window['width_inches'],
-            'schedule_height': window['height_inches'],
-            'schedule_qty': window['qty'],
-            'schedule_type': window['type'],
-            'schedule_page_id': window['schedule_page_id'],
-            'detected_qty': None,  # Would need tag detection to fill this
-            'elevation_page_ids': [str(x) for x in elevation_page_ids],
-            'head_trim_lf': derived['head_trim_lf'],
-            'jamb_trim_lf': derived['jamb_trim_lf'],
-            'sill_trim_lf': derived['sill_trim_lf'],
-            'casing_lf': derived['casing_lf'],
-            'rough_opening_width': derived['rough_opening_width'],
-            'rough_opening_height': derived['rough_opening_height'],
-            'head_flashing_lf': derived['head_flashing_lf'],
-            'sill_pan_lf': derived['sill_pan_lf'],
-            'needs_review': False,
-            'review_notes': None
-        }
-        cross_refs.append(cross_ref)
+        result = generate_markups_for_page(page_id, trades)
+        results.append({
+            'page_number': page_num,
+            'page_id': page_id,
+            'result': result
+        })
     
-    # Doors
-    for tag, door in doors_by_tag.items():
-        derived = calculate_derived_measurements(
-            door['width_inches'],
-            door['height_inches'],
-            door['qty'],
-            'door'
-        )
-        
-        cross_ref = {
-            'job_id': job_id,
-            'element_type': 'door',
-            'tag': tag,
-            'schedule_width': door['width_inches'],
-            'schedule_height': door['height_inches'],
-            'schedule_qty': door['qty'],
-            'schedule_type': door['type'],
-            'schedule_page_id': door['schedule_page_id'],
-            'detected_qty': None,
-            'elevation_page_ids': [str(x) for x in elevation_page_ids],
-            'head_trim_lf': derived['head_trim_lf'],
-            'jamb_trim_lf': derived['jamb_trim_lf'],
-            'sill_trim_lf': derived['sill_trim_lf'],
-            'casing_lf': derived['casing_lf'],
-            'rough_opening_width': derived['rough_opening_width'],
-            'rough_opening_height': derived['rough_opening_height'],
-            'head_flashing_lf': derived['head_flashing_lf'],
-            'sill_pan_lf': derived['sill_pan_lf'],
-            'needs_review': False,
-            'review_notes': None
-        }
-        cross_refs.append(cross_ref)
-    
-    # Insert cross-refs
-    for ref in cross_refs:
-        supabase_request('POST', 'extraction_cross_refs', ref)
-    
-    print(f"[{job_id}] Created {len(cross_refs)} cross-reference entries", flush=True)
-    
-    # Build takeoff summary
-    summary = {
-        'job_id': job_id,
-        'total_windows': sum(w['qty'] for w in windows_by_tag.values()),
-        'total_window_sqft': sum(
-            (w['width_inches'] * w['height_inches'] * w['qty']) / 144 
-            for w in windows_by_tag.values()
-        ),
-        'total_window_head_trim_lf': sum(
-            (w['width_inches'] * w['qty']) / 12 
-            for w in windows_by_tag.values()
-        ),
-        'total_window_jamb_trim_lf': sum(
-            (w['height_inches'] * 2 * w['qty']) / 12 
-            for w in windows_by_tag.values()
-        ),
-        'total_window_sill_trim_lf': sum(
-            (w['width_inches'] * w['qty']) / 12 
-            for w in windows_by_tag.values()
-        ),
-        'total_doors': sum(d['qty'] for d in doors_by_tag.values()),
-        'total_door_sqft': sum(
-            (d['width_inches'] * d['height_inches'] * d['qty']) / 144 
-            for d in doors_by_tag.values()
-        ),
-        'total_door_head_trim_lf': sum(
-            (d['width_inches'] * d['qty']) / 12 
-            for d in doors_by_tag.values()
-        ),
-        'total_door_jamb_trim_lf': sum(
-            (d['height_inches'] * 2 * d['qty']) / 12 
-            for d in doors_by_tag.values()
-        ),
-        'windows_by_tag': {tag: {**w, 'schedule_page_id': str(w['schedule_page_id'])} for tag, w in windows_by_tag.items()},
-        'doors_by_tag': {tag: {**d, 'schedule_page_id': str(d['schedule_page_id'])} for tag, d in doors_by_tag.items()},
-        'schedule_vs_detected_match': None,
-        'discrepancies': {
-            'schedule_windows': sum(w['qty'] for w in windows_by_tag.values()),
-            'detected_windows': total_detected_windows,
-            'schedule_doors': sum(d['qty'] for d in doors_by_tag.values()),
-            'detected_doors': total_detected_doors
-        }
-    }
-    
-    # Round numeric values
-    for key in ['total_window_sqft', 'total_window_head_trim_lf', 'total_window_jamb_trim_lf', 
-                'total_window_sill_trim_lf', 'total_door_sqft', 'total_door_head_trim_lf', 
-                'total_door_jamb_trim_lf']:
-        summary[key] = round(summary[key], 2)
-    
-    # Upsert summary
-    existing = supabase_request('GET', 'extraction_takeoff_summary', filters={'job_id': f'eq.{job_id}'})
-    if existing:
-        supabase_request('PATCH', 'extraction_takeoff_summary', summary, {'job_id': f'eq.{job_id}'})
-    else:
-        supabase_request('POST', 'extraction_takeoff_summary', summary)
-    
-    print(f"[{job_id}] Cross-reference complete!", flush=True)
-    
-    return {
-        "success": True,
-        "windows_count": len(windows_by_tag),
-        "doors_count": len(doors_by_tag),
-        "cross_refs_created": len(cross_refs),
-        "summary": summary
-    }
+    print(f"[{job_id}] Markup generation complete!", flush=True)
+    return {"success": True, "job_id": job_id, "pages_marked": len(results), "results": results}
 
 
+# Background processing functions
 def convert_pdf_background(job_id, pdf_url):
     try:
         from pdf2image import convert_from_path, pdfinfo_from_path
@@ -612,7 +580,6 @@ def convert_pdf_background(job_id, pdf_url):
             total_pages = info['Pages']
         except:
             total_pages = 100
-        print(f"[{job_id}] {total_pages} pages", flush=True)
         update_job(job_id, {'total_pages': total_pages, 'plan_dpi': DEFAULT_DPI})
         pages_converted = 0
         for start_page in range(1, total_pages + 1, PDF_CHUNK_SIZE):
@@ -643,7 +610,6 @@ def convert_pdf_background(job_id, pdf_url):
                     del img
                 del images
                 update_job(job_id, {'pages_converted': pages_converted})
-                print(f"[{job_id}] {pages_converted}/{total_pages}", flush=True)
             except Exception as e:
                 print(f"[{job_id}] Chunk error: {e}", flush=True)
         try:
@@ -651,71 +617,48 @@ def convert_pdf_background(job_id, pdf_url):
         except:
             pass
         update_job(job_id, {'status': 'converted'})
-        print(f"[{job_id}] Done!", flush=True)
     except Exception as e:
-        print(f"[{job_id}] Error: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
 
 
 def classify_job_background(job_id):
     try:
-        print(f"[{job_id}] Starting classification...", flush=True)
         update_job(job_id, {'status': 'classifying'})
         pages = supabase_request('GET', 'extraction_pages', filters={'job_id': f'eq.{job_id}', 'status': 'eq.pending', 'order': 'page_number'})
         if not pages:
-            print(f"[{job_id}] No pending pages!", flush=True)
             return
-        print(f"[{job_id}] {len(pages)} pages to classify", flush=True)
         
         elevation_count = schedule_count = floor_plan_count = other_count = 0
         scales_found = []
         
         for i, page in enumerate(pages):
-            page_id = page.get('id')
-            page_num = page.get('page_number', i+1)
-            image_url = page.get('image_url')
-            
-            print(f"[{job_id}] Page {page_num}...", flush=True)
-            classification = classify_page_with_claude(image_url)
-            
+            classification = classify_page_with_claude(page.get('image_url'))
             page_type = normalize_page_type(classification.get('page_type'))
-            confidence = classification.get('confidence', 0)
-            elevation_name = classification.get('elevation_name')
-            scale_notation = classification.get('scale_notation')
-            scale_ratio = classification.get('scale_ratio')
-            
-            print(f"[{job_id}] Page {page_num}: {page_type}, scale={scale_notation}", flush=True)
-            
-            if scale_ratio:
-                scales_found.append({'page': page_num, 'notation': scale_notation, 'ratio': scale_ratio})
             
             if page_type == 'elevation': elevation_count += 1
             elif page_type == 'schedule': schedule_count += 1
             elif page_type == 'floor_plan': floor_plan_count += 1
             else: other_count += 1
             
-            update_data = {
-                'page_type': page_type,
-                'page_type_confidence': confidence,
-                'status': 'classified',
-                'scale_notation': scale_notation,
-                'scale_ratio': scale_ratio
-            }
-            if elevation_name:
-                update_data['elevation_name'] = elevation_name
+            scale_ratio = classification.get('scale_ratio')
+            if scale_ratio:
+                scales_found.append(scale_ratio)
             
-            update_page(page_id, update_data)
+            update_page(page['id'], {
+                'page_type': page_type,
+                'page_type_confidence': classification.get('confidence', 0),
+                'status': 'classified',
+                'scale_notation': classification.get('scale_notation'),
+                'scale_ratio': scale_ratio,
+                'elevation_name': classification.get('elevation_name')
+            })
             update_job(job_id, {'pages_classified': i + 1})
             
             if (i + 1) % MAX_CONCURRENT_CLAUDE == 0:
                 time.sleep(BATCH_DELAY_SECONDS)
         
-        default_scale = None
-        if scales_found:
-            from collections import Counter
-            ratios = [s['ratio'] for s in scales_found if s['ratio']]
-            if ratios:
-                default_scale = Counter(ratios).most_common(1)[0][0]
+        from collections import Counter
+        default_scale = Counter(scales_found).most_common(1)[0][0] if scales_found else None
         
         update_job(job_id, {
             'status': 'classified',
@@ -725,15 +668,12 @@ def classify_job_background(job_id):
             'other_count': other_count,
             'default_scale_ratio': default_scale
         })
-        print(f"[{job_id}] Done! E:{elevation_count} S:{schedule_count} F:{floor_plan_count} O:{other_count}", flush=True)
     except Exception as e:
-        print(f"[{job_id}] Error: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
 
 
-def process_job_background(job_id, scale_override=None):
+def process_job_background(job_id, scale_override=None, generate_markups=True):
     try:
-        print(f"[{job_id}] Processing...", flush=True)
         update_job(job_id, {'status': 'processing'})
         
         job = supabase_request('GET', 'extraction_jobs', filters={'id': f'eq.{job_id}'})
@@ -742,50 +682,32 @@ def process_job_background(job_id, scale_override=None):
         
         pages = supabase_request('GET', 'extraction_pages', filters={'job_id': f'eq.{job_id}', 'status': 'eq.classified', 'order': 'page_number'})
         if not pages:
-            print(f"[{job_id}] No classified pages!", flush=True)
             return
         
         elevation_pages = [p for p in pages if p.get('page_type') == 'elevation']
         schedule_pages = [p for p in pages if p.get('page_type') == 'schedule']
-        print(f"[{job_id}] {len(elevation_pages)} elevations, {len(schedule_pages)} schedules", flush=True)
         
-        totals = {
-            'total_net_siding_sqft': 0, 'total_gross_wall_sqft': 0, 'total_openings_sqft': 0,
-            'total_windows': 0, 'total_doors': 0, 'total_garages': 0,
-            'scales_used': [], 'validation_warnings': []
-        }
+        totals = {'total_net_siding_sqft': 0, 'total_gross_wall_sqft': 0, 'total_windows': 0, 'total_doors': 0}
         processed = 0
         
         for page in elevation_pages:
-            page_num = page.get('page_number')
             scale_ratio = scale_override or page.get('scale_ratio') or default_scale or 48
             dpi = page.get('dpi') or job_dpi
-            
-            print(f"[{job_id}] Elevation page {page_num} scale={scale_ratio}", flush=True)
             
             detection = detect_with_roboflow(page['image_url'])
             if 'error' not in detection:
                 measurements = calculate_real_measurements(detection['predictions'], scale_ratio, dpi)
-                
-                totals['total_net_siding_sqft'] += measurements['areas']['net_siding_sqft']
-                totals['total_gross_wall_sqft'] += measurements['areas']['gross_wall_sqft']
-                totals['total_openings_sqft'] += measurements['areas']['openings_sqft']
-                totals['total_windows'] += measurements['counts']['window']
-                totals['total_doors'] += measurements['counts']['door']
-                totals['total_garages'] += measurements['counts']['garage']
-                totals['scales_used'].append({'page': page_num, 'scale': scale_ratio})
-                totals['validation_warnings'].extend(measurements.get('validation', []))
+                totals['total_net_siding_sqft'] += measurements['areas'].get('net_siding_sqft', 0)
+                totals['total_gross_wall_sqft'] += measurements['areas'].get('gross_wall_sqft', 0)
+                totals['total_windows'] += measurements['counts'].get('window', 0)
+                totals['total_doors'] += measurements['counts'].get('door', 0)
                 
                 update_page(page['id'], {
                     'status': 'complete',
-                    'extraction_data': {
-                        'measurements': measurements,
-                        'raw_predictions': detection['predictions']
-                    }
+                    'extraction_data': {'measurements': measurements, 'raw_predictions': detection['predictions']}
                 })
             else:
-                update_page(page['id'], {'status': 'failed', 'error_message': detection.get('error')})
-            
+                update_page(page['id'], {'status': 'failed'})
             processed += 1
             update_job(job_id, {'pages_processed': processed})
         
@@ -802,40 +724,116 @@ def process_job_background(job_id, scale_override=None):
             if page.get('page_type') not in ['elevation', 'schedule']:
                 update_page(page['id'], {'status': 'skipped'})
         
-        totals['total_net_siding_sqft'] = round(totals['total_net_siding_sqft'], 1)
-        totals['total_gross_wall_sqft'] = round(totals['total_gross_wall_sqft'], 1)
-        totals['total_openings_sqft'] = round(totals['total_openings_sqft'], 1)
-        
         update_job(job_id, {'status': 'complete', 'results_summary': totals})
-        print(f"[{job_id}] Complete!", flush=True)
+        
+        # Auto-generate markups
+        if generate_markups:
+            generate_markups_for_job(job_id, trades=['all', 'siding', 'roofing'])
         
         # Auto-run cross-reference
         build_cross_references(job_id)
         
     except Exception as e:
-        print(f"[{job_id}] Error: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
+
+
+def build_cross_references(job_id):
+    """Build cross-references between schedule and detections"""
+    schedule_pages = supabase_request('GET', 'extraction_pages', filters={
+        'job_id': f'eq.{job_id}', 'page_type': 'eq.schedule', 'status': 'eq.complete'
+    })
+    
+    if not schedule_pages:
+        return {"error": "No schedule data"}
+    
+    windows_by_tag = {}
+    doors_by_tag = {}
+    
+    for page in schedule_pages:
+        extraction_data = page.get('extraction_data', {})
+        page_id = page.get('id')
+        
+        for window in extraction_data.get('windows', []):
+            tag = window.get('tag', 'UNKNOWN')
+            if tag not in windows_by_tag or window.get('qty', 1) > windows_by_tag[tag]['qty']:
+                windows_by_tag[tag] = {**window, 'schedule_page_id': page_id}
+        
+        for door in extraction_data.get('doors', []):
+            tag = door.get('tag', 'UNKNOWN')
+            if tag not in doors_by_tag or door.get('qty', 1) > doors_by_tag[tag]['qty']:
+                doors_by_tag[tag] = {**door, 'schedule_page_id': page_id}
+    
+    elevation_pages = supabase_request('GET', 'extraction_pages', filters={
+        'job_id': f'eq.{job_id}', 'page_type': 'eq.elevation', 'status': 'eq.complete'
+    })
+    
+    elevation_page_ids = [p.get('id') for p in elevation_pages or []]
+    total_detected_windows = sum(p.get('extraction_data', {}).get('measurements', {}).get('counts', {}).get('window', 0) for p in elevation_pages or [])
+    total_detected_doors = sum(p.get('extraction_data', {}).get('measurements', {}).get('counts', {}).get('door', 0) for p in elevation_pages or [])
+    
+    supabase_request('DELETE', 'extraction_cross_refs', filters={'job_id': f'eq.{job_id}'})
+    
+    for tag, window in windows_by_tag.items():
+        derived = calculate_derived_measurements(window.get('width_inches', 0), window.get('height_inches', 0), window.get('qty', 1), 'window')
+        supabase_request('POST', 'extraction_cross_refs', {
+            'job_id': job_id, 'element_type': 'window', 'tag': tag,
+            'schedule_width': window.get('width_inches'), 'schedule_height': window.get('height_inches'),
+            'schedule_qty': window.get('qty', 1), 'schedule_type': window.get('type', ''),
+            'schedule_page_id': window.get('schedule_page_id'),
+            'elevation_page_ids': [str(x) for x in elevation_page_ids],
+            'head_trim_lf': derived['head_trim_lf'], 'jamb_trim_lf': derived['jamb_trim_lf'],
+            'sill_trim_lf': derived['sill_trim_lf'], 'casing_lf': derived['casing_lf'],
+            'rough_opening_width': derived['rough_opening_width'], 'rough_opening_height': derived['rough_opening_height'],
+            'head_flashing_lf': derived['head_flashing_lf'], 'sill_pan_lf': derived['sill_pan_lf'],
+            'needs_review': False
+        })
+    
+    for tag, door in doors_by_tag.items():
+        derived = calculate_derived_measurements(door.get('width_inches', 0), door.get('height_inches', 0), door.get('qty', 1), 'door')
+        supabase_request('POST', 'extraction_cross_refs', {
+            'job_id': job_id, 'element_type': 'door', 'tag': tag,
+            'schedule_width': door.get('width_inches'), 'schedule_height': door.get('height_inches'),
+            'schedule_qty': door.get('qty', 1), 'schedule_type': door.get('type', ''),
+            'schedule_page_id': door.get('schedule_page_id'),
+            'elevation_page_ids': [str(x) for x in elevation_page_ids],
+            'head_trim_lf': derived['head_trim_lf'], 'jamb_trim_lf': derived['jamb_trim_lf'],
+            'sill_trim_lf': derived['sill_trim_lf'], 'casing_lf': derived['casing_lf'],
+            'rough_opening_width': derived['rough_opening_width'], 'rough_opening_height': derived['rough_opening_height'],
+            'head_flashing_lf': derived['head_flashing_lf'], 'sill_pan_lf': derived['sill_pan_lf'],
+            'needs_review': False
+        })
+    
+    summary = {
+        'job_id': job_id,
+        'total_windows': sum(w.get('qty', 1) for w in windows_by_tag.values()),
+        'total_window_sqft': round(sum((w.get('width_inches', 0) * w.get('height_inches', 0) * w.get('qty', 1)) / 144 for w in windows_by_tag.values()), 2),
+        'total_window_head_trim_lf': round(sum((w.get('width_inches', 0) * w.get('qty', 1)) / 12 for w in windows_by_tag.values()), 2),
+        'total_window_jamb_trim_lf': round(sum((w.get('height_inches', 0) * 2 * w.get('qty', 1)) / 12 for w in windows_by_tag.values()), 2),
+        'total_window_sill_trim_lf': round(sum((w.get('width_inches', 0) * w.get('qty', 1)) / 12 for w in windows_by_tag.values()), 2),
+        'total_doors': sum(d.get('qty', 1) for d in doors_by_tag.values()),
+        'total_door_sqft': round(sum((d.get('width_inches', 0) * d.get('height_inches', 0) * d.get('qty', 1)) / 144 for d in doors_by_tag.values()), 2),
+        'total_door_head_trim_lf': round(sum((d.get('width_inches', 0) * d.get('qty', 1)) / 12 for d in doors_by_tag.values()), 2),
+        'total_door_jamb_trim_lf': round(sum((d.get('height_inches', 0) * 2 * d.get('qty', 1)) / 12 for d in doors_by_tag.values()), 2),
+        'windows_by_tag': {t: {**w, 'schedule_page_id': str(w['schedule_page_id'])} for t, w in windows_by_tag.items()},
+        'doors_by_tag': {t: {**d, 'schedule_page_id': str(d['schedule_page_id'])} for t, d in doors_by_tag.items()},
+        'discrepancies': {'schedule_windows': sum(w.get('qty', 1) for w in windows_by_tag.values()), 'detected_windows': total_detected_windows,
+                         'schedule_doors': sum(d.get('qty', 1) for d in doors_by_tag.values()), 'detected_doors': total_detected_doors}
+    }
+    
+    existing = supabase_request('GET', 'extraction_takeoff_summary', filters={'job_id': f'eq.{job_id}'})
+    if existing:
+        supabase_request('PATCH', 'extraction_takeoff_summary', summary, {'job_id': f'eq.{job_id}'})
+    else:
+        supabase_request('POST', 'extraction_takeoff_summary', summary)
+    
+    return {"success": True, "windows_count": len(windows_by_tag), "doors_count": len(doors_by_tag)}
 
 
 # === ENDPOINTS ===
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy", "version": "3.1", "features": ["scale_extraction", "cross_reference", "derived_measurements"]})
-
-@app.route('/parse-scale', methods=['POST'])
-def parse_scale_endpoint():
-    data = request.json
-    notation = data.get('notation', '')
-    ratio = parse_scale_notation(notation)
-    return jsonify({"notation": notation, "scale_ratio": ratio})
-
-@app.route('/classify-page', methods=['POST'])
-def classify_page_endpoint():
-    data = request.json
-    if not data.get('image_url'):
-        return jsonify({"error": "image_url required"}), 400
-    return jsonify(classify_page_with_claude(data['image_url']))
+    return jsonify({"status": "healthy", "version": "3.2", "features": ["markups", "scale_extraction", "cross_reference"]})
 
 @app.route('/start-job', methods=['POST'])
 def start_job():
@@ -843,11 +841,8 @@ def start_job():
     if not data.get('pdf_url') or not data.get('project_id'):
         return jsonify({"error": "pdf_url and project_id required"}), 400
     job_result = supabase_request('POST', 'extraction_jobs', {
-        'project_id': data['project_id'],
-        'project_name': data.get('project_name', ''),
-        'source_pdf_url': data['pdf_url'],
-        'status': 'pending',
-        'plan_dpi': DEFAULT_DPI
+        'project_id': data['project_id'], 'project_name': data.get('project_name', ''),
+        'source_pdf_url': data['pdf_url'], 'status': 'pending', 'plan_dpi': DEFAULT_DPI
     })
     if not job_result:
         return jsonify({"error": "Failed to create job"}), 500
@@ -868,13 +863,26 @@ def process_job():
     data = request.json
     if not data.get('job_id'):
         return jsonify({"error": "job_id required"}), 400
-    scale_override = data.get('scale_ratio')
-    threading.Thread(target=process_job_background, args=(data['job_id'], scale_override)).start()
+    threading.Thread(target=process_job_background, args=(data['job_id'], data.get('scale_ratio'), data.get('generate_markups', True))).start()
     return jsonify({"success": True, "job_id": data['job_id'], "status": "processing"})
+
+@app.route('/generate-markups', methods=['POST'])
+def generate_markups():
+    """Generate markups for a job or single page"""
+    data = request.json
+    trades = data.get('trades', ['all', 'siding', 'roofing'])
+    
+    if data.get('page_id'):
+        result = generate_markups_for_page(data['page_id'], trades)
+    elif data.get('job_id'):
+        result = generate_markups_for_job(data['job_id'], trades)
+    else:
+        return jsonify({"error": "job_id or page_id required"}), 400
+    
+    return jsonify(result)
 
 @app.route('/cross-reference', methods=['POST'])
 def cross_reference():
-    """Manually trigger cross-reference building"""
     data = request.json
     if not data.get('job_id'):
         return jsonify({"error": "job_id required"}), 400
@@ -883,7 +891,6 @@ def cross_reference():
 
 @app.route('/takeoff-summary', methods=['GET'])
 def takeoff_summary():
-    """Get takeoff summary for a job"""
     job_id = request.args.get('job_id')
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
@@ -894,7 +901,6 @@ def takeoff_summary():
 
 @app.route('/cross-refs', methods=['GET'])
 def get_cross_refs():
-    """Get cross-references for a job"""
     job_id = request.args.get('job_id')
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
@@ -918,12 +924,10 @@ def job_status():
 def list_jobs():
     return jsonify({"jobs": supabase_request('GET', 'extraction_jobs', filters={'order': 'created_at.desc', 'limit': '50'}) or []})
 
-@app.route('/test-update', methods=['POST'])
-def test_update():
+@app.route('/parse-scale', methods=['POST'])
+def parse_scale_endpoint():
     data = request.json
-    page_id = data.get('page_id')
-    result = update_page(page_id, {'page_type': 'other', 'status': 'classified'})
-    return jsonify({"success": bool(result), "result": result})
+    return jsonify({"notation": data.get('notation', ''), "scale_ratio": parse_scale_notation(data.get('notation', ''))})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5050)), debug=False)
