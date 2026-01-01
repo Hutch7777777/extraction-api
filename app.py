@@ -784,7 +784,7 @@ def build_cross_references(job_id):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy", "version": "3.2", "features": ["markups", "scale_extraction", "cross_reference"]})
+    return jsonify({"status": "healthy", "version": "3.4", "features": ["markups", "scale_extraction", "cross_reference"]})
 
 @app.route('/start-job', methods=['POST'])
 def start_job():
@@ -1272,3 +1272,184 @@ def test_markup():
     except Exception as e:
         import traceback
         return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+
+
+# ============================================================
+# FLOOR PLAN CORNER ANALYSIS
+# ============================================================
+
+def analyze_floor_plan_corners(image_url):
+    """
+    Use Claude Vision to count outside and inside corners from a floor plan.
+    """
+    try:
+        # Download and encode image
+        response = requests.get(image_url)
+        if response.status_code != 200:
+            return {"error": f"Failed to download image: {response.status_code}"}
+        
+        image_base64 = base64.b64encode(response.content).decode('utf-8')
+        
+        prompt = """Analyze this architectural floor plan. Focus ONLY on the EXTERIOR BUILDING PERIMETER (the outermost walls that define the building footprint - typically shown as thick black lines).
+
+TASK: Trace the exterior perimeter and count corners.
+
+DEFINITIONS:
+- OUTSIDE CORNER (convex): Where two exterior walls meet and point OUTWARD (away from building interior). These are the "bump out" corners.
+- INSIDE CORNER (concave): Where two exterior walls meet and point INWARD (into the building). These are the "cut in" corners, like where an L-shape occurs.
+
+DO NOT COUNT:
+- Interior wall corners (rooms, closets, etc.)
+- Window or door openings
+- Garage door openings
+- Porch railings or deck edges (only count if they have siding)
+
+If there are multiple floor plans or units on this sheet, analyze each separately.
+
+Return ONLY valid JSON in this exact format:
+{
+  "floor_plans": [
+    {
+      "name": "Unit/Floor Plan Name",
+      "outside_corners": <integer>,
+      "inside_corners": <integer>,
+      "confidence": "high/medium/low",
+      "notes": "any observations about complexity"
+    }
+  ],
+  "total_outside_corners": <sum of all>,
+  "total_inside_corners": <sum of all>
+}"""
+
+        api_response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1000,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_base64}},
+                        {"type": "text", "text": prompt}
+                    ]
+                }]
+            },
+            timeout=60
+        )
+        
+        if api_response.status_code == 200:
+            result = api_response.json()
+            content = result.get('content', [{}])[0].get('text', '{}')
+            # Clean up response - extract JSON
+            if '```json' in content:
+                content = content.split('```json')[1].split('```')[0]
+            elif '```' in content:
+                content = content.split('```')[1].split('```')[0]
+            return json.loads(content.strip())
+        else:
+            return {"error": f"API error: {api_response.status_code}"}
+            
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.route('/analyze-floor-plan', methods=['POST'])
+def analyze_floor_plan():
+    """
+    Analyze floor plan(s) to count corners.
+    
+    POST body:
+    - page_id: specific floor plan page
+    - job_id: analyze all floor plans for a job
+    """
+    data = request.json
+    
+    if data.get('page_id'):
+        # Single page analysis
+        page = supabase_request('GET', 'extraction_pages', filters={'id': f"eq.{data['page_id']}"})
+        if not page:
+            return jsonify({"error": "Page not found"}), 404
+        page = page[0]
+        
+        if page.get('page_type') != 'floor_plan':
+            return jsonify({"error": f"Page is type '{page.get('page_type')}', not floor_plan"}), 400
+        
+        result = analyze_floor_plan_corners(page['image_url'])
+        result['page_id'] = data['page_id']
+        result['page_number'] = page.get('page_number')
+        return jsonify(result)
+    
+    elif data.get('job_id'):
+        # Analyze all floor plans for job
+        pages = supabase_request('GET', 'extraction_pages', filters={
+            'job_id': f"eq.{data['job_id']}",
+            'page_type': 'eq.floor_plan',
+            'order': 'page_number'
+        })
+        
+        if not pages:
+            return jsonify({"error": "No floor plan pages found"}), 404
+        
+        results = []
+        total_outside = 0
+        total_inside = 0
+        
+        for page in pages:
+            print(f"Analyzing floor plan page {page.get('page_number')}...")
+            result = analyze_floor_plan_corners(page['image_url'])
+            result['page_id'] = page['id']
+            result['page_number'] = page.get('page_number')
+            results.append(result)
+            
+            if 'total_outside_corners' in result:
+                total_outside += result.get('total_outside_corners', 0)
+                total_inside += result.get('total_inside_corners', 0)
+        
+        # Get wall height from job totals for LF calculation
+        job_totals = supabase_request('GET', 'extraction_job_totals', filters={
+            'job_id': f"eq.{data['job_id']}"
+        })
+        
+        wall_height = 9.0  # Default
+        if job_totals and job_totals[0].get('total_gross_facade_sf') and job_totals[0].get('total_roof_eave_lf'):
+            facade = float(job_totals[0]['total_gross_facade_sf'])
+            eave = float(job_totals[0]['total_roof_eave_lf'])
+            if eave > 0:
+                wall_height = facade / eave
+        
+        # Calculate LF
+        outside_lf = round(total_outside * wall_height, 2)
+        inside_lf = round(total_inside * wall_height, 2)
+        
+        # Update job totals
+        if job_totals:
+            supabase_request('PATCH', 'extraction_job_totals', 
+                filters={'job_id': f"eq.{data['job_id']}"},
+                data={
+                    'outside_corners_count': total_outside,
+                    'inside_corners_count': total_inside,
+                    'outside_corners_lf': outside_lf,
+                    'inside_corners_lf': inside_lf,
+                    'corner_source': 'floor_plan_analysis'
+                }
+            )
+        
+        return jsonify({
+            "job_id": data['job_id'],
+            "floor_plans_analyzed": len(results),
+            "total_outside_corners": total_outside,
+            "total_inside_corners": total_inside,
+            "wall_height_used": round(wall_height, 2),
+            "outside_corners_lf": outside_lf,
+            "inside_corners_lf": inside_lf,
+            "per_page_results": results
+        })
+    
+    return jsonify({"error": "page_id or job_id required"}), 400
+
+
