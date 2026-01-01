@@ -1680,7 +1680,7 @@ def generate_comprehensive_markup(page_id):
     
     # Save to buffer
     buffer = io.BytesIO()
-    final_img.save(buffer, format='PNG', quality=95)
+    final_img.save(buffer, format='PNG')
     buffer.seek(0)
     
     # Upload to Supabase
