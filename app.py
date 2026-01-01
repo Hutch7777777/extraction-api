@@ -122,7 +122,6 @@ def generate_markup_image(image_data, predictions, scale_ratio, dpi=DEFAULT_DPI,
     img = Image.open(BytesIO(image_data)).convert('RGB')
     draw = ImageDraw.Draw(img)
     
-    # Try to load font
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
         small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
@@ -142,7 +141,7 @@ def generate_markup_image(image_data, predictions, scale_ratio, dpi=DEFAULT_DPI,
     totals = {}
     
     for pred in filtered_preds:
-        class_name = pred.get('class', '').lower()
+        class_name = pred.get('class', '').lower().replace(' ', '_')
         x = pred.get('x', 0)
         y = pred.get('y', 0)
         width = pred.get('width', 0)
@@ -164,40 +163,28 @@ def generate_markup_image(image_data, predictions, scale_ratio, dpi=DEFAULT_DPI,
         totals[class_name]['count'] += 1
         totals[class_name]['area_sqft'] += area_sqft
         
-        # Draw rectangle
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
         
-        # Add label
-        if show_labels:
-            label = class_name.upper()
+        if show_labels and class_name in ['window', 'door', 'garage', 'building', 'roof']:
+            label = class_name.upper()[:3]
+            real_width_ft = real_width_in / 12
+            real_height_ft = real_height_in / 12
             if show_dimensions:
-                real_width_ft = real_width_in / 12
-                real_height_ft = real_height_in / 12
-                if real_width_ft >= 1:
-                    label += f" {real_width_ft:.1f}'x{real_height_ft:.1f}'"
-                else:
-                    label += f" {real_width_in:.0f}x{real_height_in:.0f}"
-                if class_name in ['building', 'roof']:
-                    label += f" {area_sqft:.0f}SF"
-            
-            # Simple label background
+                label += f" {real_width_ft:.1f}x{real_height_ft:.1f}"
             try:
-                bbox = draw.textbbox((x1, y1 - 35), label, font=small_font)
-                draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill=(255, 255, 255))
-                draw.text((x1, y1 - 35), label, fill=color, font=small_font)
+                draw.text((x1+2, y1+2), label, fill=color, font=small_font)
             except:
-                draw.text((x1, y1 - 20), label, fill=color)
+                draw.text((x1+2, y1+2), label, fill=color)
     
-    # Legend
     legend_y = 10
     try:
-        draw.rectangle([5, 5, 200, 20 + len(totals) * 22], fill=(255, 255, 255), outline=(0, 0, 0))
-        draw.text((10, legend_y), "MARKUP LEGEND", fill=(0, 0, 0), font=font)
-        legend_y += 18
+        draw.rectangle([5, 5, 220, 25 + len(totals) * 20], fill=(255, 255, 255), outline=(0, 0, 0))
+        draw.text((10, legend_y), "LEGEND", fill=(0, 0, 0), font=font)
+        legend_y += 20
         for class_name, data in totals.items():
             color = MARKUP_COLORS.get(class_name, (128, 128, 128))
             draw.rectangle([10, legend_y, 25, legend_y + 12], fill=color)
-            draw.text((30, legend_y), f"{class_name.upper()}: {data['count']} ({data['area_sqft']:.0f}SF)", fill=(0, 0, 0), font=small_font)
+            draw.text((30, legend_y), f"{class_name}: {data['count']} ({data['area_sqft']:.0f}SF)", fill=(0, 0, 0), font=small_font)
             legend_y += 18
     except:
         pass
