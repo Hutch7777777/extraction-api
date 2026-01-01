@@ -495,28 +495,35 @@ def generate_markups_for_page(page_id, trades=None):
     markup_urls = {}
     
     for trade in trades:
-        trade_filter = TRADE_GROUPS.get(trade, TRADE_GROUPS['all'])
-        
-        # Generate markup
-        marked_img, totals = generate_markup_image(
-            image_data, predictions, scale_ratio, dpi,
-            trade_filter=trade_filter, show_dimensions=True, show_labels=True
-        )
-        
-        # Save to buffer
-        buffer = BytesIO()
-        marked_img.save(buffer, format='PNG', optimize=True)
-        buffer.seek(0)
-        
-        # Upload to Supabase
-        filename = f"{job_id}/markup_{page_num:03d}_{trade}.png"
-        markup_url = upload_to_supabase(buffer.getvalue(), filename, 'image/png')
-        
-        if markup_url:
-            markup_urls[trade] = {
-                'url': markup_url,
-                'totals': totals
-            }
+        try:
+            trade_filter = TRADE_GROUPS.get(trade, TRADE_GROUPS['all'])
+            
+            # Generate markup
+            marked_img, totals = generate_markup_image(
+                image_data, predictions, scale_ratio, dpi,
+                trade_filter=trade_filter, show_dimensions=True, show_labels=True
+            )
+            
+            # Save to buffer
+            buffer = BytesIO()
+            marked_img.save(buffer, format='PNG', optimize=True)
+            buffer.seek(0)
+            
+            # Upload to Supabase
+            filename = f"{job_id}/markup_{page_num:03d}_{trade}.png"
+            markup_url = upload_to_supabase(buffer.getvalue(), filename, 'image/png')
+            
+            if markup_url:
+                markup_urls[trade] = {
+                    'url': markup_url,
+                    'totals': totals
+                }
+            else:
+                print(f"Failed to upload markup for {trade}", flush=True)
+        except Exception as e:
+            print(f"Error generating markup for {trade}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
     
     # Update page with markup URLs
     update_page(page_id, {
