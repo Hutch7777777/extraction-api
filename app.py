@@ -412,8 +412,8 @@ def generate_markups_for_page(page_id, trades=None):
     image_url = page.get('image_url')
     extraction_data = page.get('extraction_data', {})
     predictions = extraction_data.get('raw_predictions', [])
-    scale_ratio = page.get('scale_ratio') or 48
-    dpi = page.get('dpi') or DEFAULT_DPI
+    scale_ratio = float(page.get('scale_ratio') or 48)
+    dpi = int(page.get('dpi') or DEFAULT_DPI)
     job_id = page.get('job_id')
     page_num = page.get('page_number')
     
@@ -952,7 +952,7 @@ def test_markup():
         image_url = page.get('image_url')
         extraction_data = page.get('extraction_data', {})
         predictions = extraction_data.get('raw_predictions', [])
-        scale_ratio = page.get('scale_ratio') or 48
+        scale_ratio = float(page.get('scale_ratio') or 48)
         
         # Download image
         response = requests.get(image_url, timeout=30)
