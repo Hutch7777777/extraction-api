@@ -931,3 +931,40 @@ def parse_scale_endpoint():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5050)), debug=False)
+
+@app.route('/test-markup', methods=['POST'])
+def test_markup():
+    """Debug markup generation"""
+    data = request.json
+    page_id = data.get('page_id')
+    
+    try:
+        # Get page data
+        page = supabase_request('GET', 'extraction_pages', filters={'id': f'eq.{page_id}'})
+        if not page:
+            return jsonify({"error": "Page not found"})
+        page = page[0]
+        
+        image_url = page.get('image_url')
+        extraction_data = page.get('extraction_data', {})
+        predictions = extraction_data.get('raw_predictions', [])
+        scale_ratio = page.get('scale_ratio') or 48
+        
+        # Download image
+        response = requests.get(image_url, timeout=30)
+        image_data = response.content
+        
+        # Try to open image
+        from PIL import Image
+        img = Image.open(BytesIO(image_data))
+        
+        return jsonify({
+            "image_url": image_url,
+            "image_size": img.size,
+            "predictions_count": len(predictions),
+            "scale_ratio": scale_ratio,
+            "first_prediction": predictions[0] if predictions else None
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
