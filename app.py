@@ -784,7 +784,7 @@ def build_cross_references(job_id):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy", "version": "3.4", "features": ["markups", "scale_extraction", "cross_reference"]})
+    return jsonify({"status": "healthy", "version": "3.5", "features": ["markups", "scale_extraction", "cross_reference"]})
 
 @app.route('/start-job', methods=['POST'])
 def start_job():
@@ -1448,6 +1448,261 @@ def analyze_floor_plan():
             "outside_corners_lf": outside_lf,
             "inside_corners_lf": inside_lf,
             "per_page_results": results
+        })
+    
+    return jsonify({"error": "page_id or job_id required"}), 400
+
+
+
+
+# ============================================================
+# COMPREHENSIVE MARKUP GENERATION
+# ============================================================
+
+def generate_comprehensive_markup(page_id):
+    """
+    Generate a single comprehensive markup image for an elevation.
+    Shows all detections with dimensions and a summary legend.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+    
+    # Get page data
+    page = supabase_request('GET', 'extraction_pages', filters={'id': f'eq.{page_id}'})
+    if not page:
+        return {"error": "Page not found"}
+    page = page[0]
+    
+    job_id = page.get('job_id')
+    page_number = page.get('page_number', 0)
+    elevation_name = page.get('elevation_name', 'unknown')
+    
+    # Get detection details for this page
+    detections = supabase_request('GET', 'extraction_detection_details', filters={
+        'page_id': f'eq.{page_id}',
+        'order': 'class,detection_index'
+    })
+    
+    if not detections:
+        return {"error": "No detections for this page"}
+    
+    # Get elevation calculations
+    calcs = supabase_request('GET', 'extraction_elevation_calcs', filters={
+        'page_id': f'eq.{page_id}'
+    })
+    calc = calcs[0] if calcs else {}
+    
+    # Download base image
+    image_url = page.get('image_url')
+    if not image_url:
+        return {"error": "No image URL for page"}
+    
+    response = requests.get(image_url)
+    if response.status_code != 200:
+        return {"error": f"Failed to download image: {response.status_code}"}
+    
+    img = Image.open(io.BytesIO(response.content)).convert('RGB')
+    draw = ImageDraw.Draw(img)
+    
+    # Try to load a font, fall back to default
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+        font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+    except:
+        font = ImageFont.load_default()
+        font_small = font
+        font_large = font
+    
+    # Color scheme
+    COLORS = {
+        'building': '#22C55E',      # Green
+        'exterior_wall': '#22C55E', # Green
+        'window': '#3B82F6',        # Blue
+        'door': '#F97316',          # Orange
+        'garage': '#A855F7',        # Purple
+        'roof': '#EF4444',          # Red
+        'gable': '#EC4899',         # Pink
+    }
+    
+    # Count by class for legend
+    class_counts = {}
+    class_areas = {}
+    
+    # Draw each detection
+    for det in detections:
+        cls = det.get('class', 'unknown')
+        color = COLORS.get(cls, '#888888')
+        
+        # Get pixel coordinates
+        px = float(det.get('pixel_x', 0))
+        py = float(det.get('pixel_y', 0))
+        pw = float(det.get('pixel_width', 0))
+        ph = float(det.get('pixel_height', 0))
+        
+        # Calculate bounding box (x,y is center)
+        x1 = px - pw/2
+        y1 = py - ph/2
+        x2 = px + pw/2
+        y2 = py + ph/2
+        
+        # Get real dimensions
+        width_ft = float(det.get('real_width_ft', 0))
+        height_ft = float(det.get('real_height_ft', 0))
+        area_sf = float(det.get('area_sf', 0))
+        
+        # Draw bounding box
+        line_width = 3 if cls in ['building', 'exterior_wall'] else 2
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
+        
+        # Draw dimension label
+        if cls in ['window', 'door', 'garage']:
+            label = f"{width_ft:.1f}'x{height_ft:.1f}'"
+            # Position label inside box at top
+            label_y = y1 + 2
+            draw.text((x1 + 3, label_y), label, fill=color, font=font_small)
+        elif cls == 'gable':
+            label = f"{area_sf:.0f} SF"
+            draw.text((x1 + 3, y1 + 2), label, fill=color, font=font_small)
+        elif cls in ['building', 'exterior_wall']:
+            label = f"{area_sf:.0f} SF"
+            draw.text((x1 + 5, y1 + 5), label, fill=color, font=font)
+        elif cls == 'roof':
+            label = f"{area_sf:.0f} SF"
+            draw.text((x1 + 5, y1 + 5), label, fill=color, font=font)
+        
+        # Track counts and areas
+        if cls not in class_counts:
+            class_counts[cls] = 0
+            class_areas[cls] = 0
+        class_counts[cls] += 1
+        class_areas[cls] += area_sf
+    
+    # Draw legend box in top-left
+    legend_x = 10
+    legend_y = 10
+    legend_width = 280
+    legend_height = 220
+    
+    # Semi-transparent background
+    overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    overlay_draw.rectangle([legend_x, legend_y, legend_x + legend_width, legend_y + legend_height], 
+                           fill=(255, 255, 255, 230))
+    img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+    draw = ImageDraw.Draw(img)
+    
+    # Legend title
+    title = f"ELEVATION: {elevation_name.upper() if elevation_name else 'UNKNOWN'}"
+    draw.text((legend_x + 10, legend_y + 5), title, fill='#000000', font=font_large)
+    
+    # Legend items
+    y_offset = legend_y + 30
+    line_height = 18
+    
+    for cls, color in COLORS.items():
+        if cls in class_counts:
+            count = class_counts[cls]
+            area = class_areas[cls]
+            label = f"{cls.replace('_', ' ').title()}: {count} ({area:.0f} SF)"
+            
+            # Color box
+            draw.rectangle([legend_x + 10, y_offset, legend_x + 25, y_offset + 12], 
+                          fill=color, outline='#000000')
+            draw.text((legend_x + 32, y_offset - 2), label, fill='#000000', font=font_small)
+            y_offset += line_height
+    
+    # Summary calculations
+    y_offset += 10
+    draw.line([(legend_x + 10, y_offset), (legend_x + legend_width - 10, y_offset)], fill='#000000', width=1)
+    y_offset += 8
+    
+    gross_facade = float(calc.get('gross_facade_sf', 0))
+    openings = float(calc.get('total_openings_sf', 0))
+    net_siding = float(calc.get('net_siding_sf', 0))
+    gable = float(calc.get('gable_area_sf', 0))
+    
+    draw.text((legend_x + 10, y_offset), f"Gross Facade: {gross_facade:.0f} SF", fill='#000000', font=font_small)
+    y_offset += line_height
+    draw.text((legend_x + 10, y_offset), f"- Openings: {openings:.0f} SF", fill='#000000', font=font_small)
+    y_offset += line_height
+    draw.text((legend_x + 10, y_offset), f"+ Gables: {gable:.0f} SF", fill='#000000', font=font_small)
+    y_offset += line_height
+    draw.text((legend_x + 10, y_offset), f"= NET SIDING: {net_siding:.0f} SF", fill='#000000', font=font_large)
+    
+    # Save to buffer
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG', quality=95)
+    buffer.seek(0)
+    
+    # Upload to Supabase
+    filename = f"comprehensive_{page_number:03d}_{elevation_name or 'elevation'}.png"
+    filepath = f"{job_id}/{filename}"
+    
+    upload_url = f"{SUPABASE_URL}/storage/v1/object/extraction-markups/{filepath}"
+    upload_response = requests.post(
+        upload_url,
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "image/png",
+            "x-upsert": "true"
+        },
+        data=buffer.getvalue()
+    )
+    
+    if upload_response.status_code in [200, 201]:
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/extraction-markups/{filepath}"
+        return {
+            "success": True,
+            "page_id": page_id,
+            "elevation": elevation_name,
+            "markup_url": public_url,
+            "summary": {
+                "gross_facade_sf": gross_facade,
+                "openings_sf": openings,
+                "gable_sf": gable,
+                "net_siding_sf": net_siding,
+                "detections": class_counts
+            }
+        }
+    else:
+        return {"error": f"Upload failed: {upload_response.status_code}"}
+
+
+@app.route('/comprehensive-markup', methods=['POST'])
+def comprehensive_markup():
+    """
+    Generate comprehensive markup for elevation page(s).
+    
+    POST body:
+    - page_id: specific elevation page
+    - job_id: all elevations for a job
+    """
+    data = request.json
+    
+    if data.get('page_id'):
+        return jsonify(generate_comprehensive_markup(data['page_id']))
+    
+    elif data.get('job_id'):
+        # Get all elevation pages
+        pages = supabase_request('GET', 'extraction_pages', filters={
+            'job_id': f"eq.{data['job_id']}",
+            'page_type': 'eq.elevation',
+            'order': 'page_number'
+        })
+        
+        if not pages:
+            return jsonify({"error": "No elevation pages found"}), 404
+        
+        results = []
+        for page in pages:
+            result = generate_comprehensive_markup(page['id'])
+            results.append(result)
+        
+        return jsonify({
+            "job_id": data['job_id'],
+            "markups_generated": len([r for r in results if r.get('success')]),
+            "results": results
         })
     
     return jsonify({"error": "page_id or job_id required"}), 400
