@@ -473,7 +473,7 @@ def build_cross_references(job_id):
             'schedule_type': window['type'],
             'schedule_page_id': window['schedule_page_id'],
             'detected_qty': None,  # Would need tag detection to fill this
-            'elevation_page_ids': elevation_page_ids,
+            'elevation_page_ids': [str(x) for x in elevation_page_ids],
             'perimeter_lf': derived['perimeter_lf'],
             'area_sf': derived['area_sf'],
             'head_trim_lf': derived['head_trim_lf'],
@@ -509,7 +509,7 @@ def build_cross_references(job_id):
             'schedule_type': door['type'],
             'schedule_page_id': door['schedule_page_id'],
             'detected_qty': None,
-            'elevation_page_ids': elevation_page_ids,
+            'elevation_page_ids': [str(x) for x in elevation_page_ids],
             'perimeter_lf': derived['perimeter_lf'],
             'area_sf': derived['area_sf'],
             'head_trim_lf': derived['head_trim_lf'],
