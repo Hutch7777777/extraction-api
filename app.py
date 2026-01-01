@@ -126,7 +126,7 @@ def detect_with_roboflow(image_url, scale_config=None):
 
 def classify_page_with_claude(image_url):
     if not ANTHROPIC_API_KEY:
-        return {"page_type": "unknown", "confidence": 0}
+        return {"page_type": "other", "confidence": 0}
     try:
         response = requests.get(image_url, timeout=30)
         image_base64 = base64.b64encode(response.content).decode('utf-8')
@@ -144,9 +144,9 @@ def classify_page_with_claude(image_url):
             json_match = re.search(r'\{.*\}', text, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group())
-        return {"page_type": "unknown", "confidence": 0}
+        return {"page_type": "other", "confidence": 0}
     except Exception as e:
-        return {"page_type": "unknown", "confidence": 0, "error": str(e)}
+        return {"page_type": "other", "confidence": 0, "error": str(e)}
 
 
 def ocr_schedule_with_claude(image_url):
