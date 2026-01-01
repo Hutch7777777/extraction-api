@@ -39,18 +39,20 @@ MARKUP_COLORS = {
     'door': (255, 140, 0),        # Orange
     'garage': (148, 0, 211),      # Purple
     'building': (34, 139, 34),    # Green (siding area)
+    'exterior wall': (34, 139, 34),  # Green (same as building)
+    'exterior_wall': (34, 139, 34),  # Green (normalized)
     'roof': (220, 20, 60),        # Red
     'gable': (255, 105, 180),     # Pink
     'gutter': (0, 255, 255),      # Cyan
 }
 
 TRADE_GROUPS = {
-    'siding': ['building', 'window', 'door', 'garage'],
+    'siding': ['building', 'exterior wall', 'window', 'door', 'garage'],
     'roofing': ['roof', 'gable'],
     'windows': ['window'],
     'doors': ['door', 'garage'],
-    'gutters': ['roof'],  # Gutters follow roof edges
-    'all': ['window', 'door', 'garage', 'building', 'roof', 'gable']
+    'gutters': ['roof'],
+    'all': ['window', 'door', 'garage', 'building', 'exterior wall', 'roof', 'gable']
 }
 
 
