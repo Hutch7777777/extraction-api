@@ -1714,7 +1714,7 @@ def generate_comprehensive_markup(page_id):
             }
         }
     else:
-        return {"error": f"Upload failed: {upload_response.status_code}"}
+        return {"error": f"Upload failed: {upload_response.status_code}", "detail": upload_response.text}
 
 
 
