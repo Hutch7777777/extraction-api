@@ -936,6 +936,68 @@ def parse_scale_endpoint():
     data = request.json
     return jsonify({"notation": data.get('notation', ''), "scale_ratio": parse_scale_notation(data.get('notation', ''))})
 
+
+@app.route('/debug-markup', methods=['POST'])
+def debug_markup():
+    """Debug markup with full error return"""
+    data = request.json
+    page_id = data.get('page_id')
+    
+    try:
+        page = supabase_request('GET', 'extraction_pages', filters={'id': f'eq.{page_id}'})
+        if not page:
+            return jsonify({"step": "get_page", "error": "Page not found"})
+        page = page[0]
+        
+        image_url = page.get('image_url')
+        extraction_data = page.get('extraction_data', {})
+        predictions = extraction_data.get('raw_predictions', [])
+        scale_ratio = float(page.get('scale_ratio') or 48)
+        dpi = page.get('dpi') or 100
+        job_id = page.get('job_id')
+        page_num = page.get('page_number')
+        
+        if not predictions:
+            return jsonify({"step": "check_predictions", "error": "No predictions"})
+        
+        # Download image
+        response = requests.get(image_url, timeout=30)
+        image_data = response.content
+        
+        # Simple markup - just draw boxes
+        from PIL import Image, ImageDraw
+        img = Image.open(BytesIO(image_data)).convert('RGB')
+        draw = ImageDraw.Draw(img)
+        
+        count = 0
+        for pred in predictions[:10]:  # Just first 10
+            x = pred.get('x', 0)
+            y = pred.get('y', 0)
+            w = pred.get('width', 0)
+            h = pred.get('height', 0)
+            x1, y1 = int(x - w/2), int(y - h/2)
+            x2, y2 = int(x + w/2), int(y + h/2)
+            draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=3)
+            count += 1
+        
+        # Save
+        buffer = BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        
+        # Upload
+        filename = f"{job_id}/debug_markup_{page_num:03d}.png"
+        markup_url = upload_to_supabase(buffer.getvalue(), filename, 'image/png')
+        
+        return jsonify({
+            "success": True,
+            "boxes_drawn": count,
+            "url": markup_url
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5050)), debug=False)
 
