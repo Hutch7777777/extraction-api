@@ -12,12 +12,14 @@ import tempfile
 import re
 from io import BytesIO
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app, origins=['http://localhost:3000', 'https://*.vercel.app'])
 
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
