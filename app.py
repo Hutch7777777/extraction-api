@@ -1753,7 +1753,171 @@ def comprehensive_markup():
             "markups_generated": len([r for r in results if r.get('success')]),
             "results": results
         })
-    
+
     return jsonify({"error": "page_id or job_id required"}), 400
 
 
+@app.route('/generate-facade-markup', methods=['POST'])
+def generate_facade_markup():
+    """
+    Generate facade markup from verified detection data.
+    This creates a clean visualization AFTER human review.
+    """
+    data = request.json
+    job_id = data.get('job_id')
+    page_id = data.get('page_id')
+
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+
+    headers = {
+        'apikey': SUPABASE_KEY,
+        'Authorization': f'Bearer {SUPABASE_KEY}',
+        'Content-Type': 'application/json'
+    }
+
+    page_query = f"{SUPABASE_URL}/rest/v1/extraction_pages?job_id=eq.{job_id}&select=id,page_number,original_image_url,image_url"
+    if page_id:
+        page_query += f"&id=eq.{page_id}"
+
+    page_response = requests.get(page_query, headers=headers)
+    pages = page_response.json()
+
+    if not pages:
+        return jsonify({"error": "No pages found"}), 404
+
+    results = []
+
+    for page in pages:
+        pg_id = page['id']
+        page_number = page['page_number']
+        image_url = page.get('original_image_url') or page.get('image_url')
+
+        if not image_url:
+            results.append({"page_number": page_number, "error": "No image URL"})
+            continue
+
+        det_query = f"{SUPABASE_URL}/rest/v1/extraction_detection_details?page_id=eq.{pg_id}&status=neq.deleted&select=class,pixel_x,pixel_y,pixel_width,pixel_height,area_sf,real_width_ft,real_height_ft"
+        det_response = requests.get(det_query, headers=headers)
+        detections = det_response.json()
+
+        try:
+            img_response = requests.get(image_url)
+            img = Image.open(BytesIO(img_response.content)).convert('RGBA')
+        except Exception as e:
+            results.append({"page_number": page_number, "error": f"Failed to load image: {e}"})
+            continue
+
+        overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        gross_facade_sf = 0
+        openings_sf = 0
+        window_count = 0
+        door_count = 0
+        garage_count = 0
+
+        buildings = []
+        openings = []
+
+        for det in detections:
+            cls = det.get('class', '').lower()
+            cx = det.get('pixel_x', 0)
+            cy = det.get('pixel_y', 0)
+            w = det.get('pixel_width', 0)
+            h = det.get('pixel_height', 0)
+            area = det.get('area_sf', 0)
+
+            x1 = cx - w / 2
+            y1 = cy - h / 2
+            x2 = cx + w / 2
+            y2 = cy + h / 2
+
+            if cls == 'building':
+                buildings.append((x1, y1, x2, y2))
+                gross_facade_sf += area
+            elif cls in ['window', 'door', 'garage']:
+                openings.append((x1, y1, x2, y2, cls))
+                openings_sf += area
+                if cls == 'window':
+                    window_count += 1
+                elif cls == 'door':
+                    door_count += 1
+                elif cls == 'garage':
+                    garage_count += 1
+
+        net_siding_sf = gross_facade_sf - openings_sf
+
+        for (x1, y1, x2, y2) in buildings:
+            draw.rectangle([x1, y1, x2, y2], fill=(59, 130, 246, 100), outline=(59, 130, 246, 255), width=3)
+
+        color_map = {
+            'window': (249, 115, 22, 150),
+            'door': (34, 197, 94, 150),
+            'garage': (234, 179, 8, 150)
+        }
+
+        for (x1, y1, x2, y2, cls) in openings:
+            color = color_map.get(cls, (255, 0, 0, 150))
+            draw.rectangle([x1, y1, x2, y2], fill=color, outline=(255, 255, 255, 255), width=2)
+
+        result_img = Image.alpha_composite(img, overlay)
+        draw_result = ImageDraw.Draw(result_img)
+
+        try:
+            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+        except:
+            font_large = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+
+        summary_lines = [
+            f"NET FACADE: {net_siding_sf:,.0f} SF",
+            f"Gross: {gross_facade_sf:,.0f} SF",
+            f"Openings: {openings_sf:,.0f} SF",
+            f"Win: {window_count} | Door: {door_count} | Garage: {garage_count}"
+        ]
+
+        draw_result.rectangle([10, 10, 350, 120], fill=(0, 0, 0, 200))
+
+        y_pos = 20
+        draw_result.text((20, y_pos), summary_lines[0], fill=(59, 130, 246), font=font_large)
+        y_pos += 30
+        for line in summary_lines[1:]:
+            draw_result.text((20, y_pos), line, fill=(255, 255, 255), font=font_small)
+            y_pos += 22
+
+        legend_y = img.size[1] - 40
+        legend_items = [("Facade", (59, 130, 246)), ("Window", (249, 115, 22)), ("Door", (34, 197, 94)), ("Garage", (234, 179, 8))]
+
+        x_pos = 20
+        for label, color in legend_items:
+            draw_result.rectangle([x_pos, legend_y, x_pos + 20, legend_y + 20], fill=color)
+            draw_result.text((x_pos + 25, legend_y), label, fill=(255, 255, 255), font=font_small)
+            x_pos += 100
+
+        buffer = BytesIO()
+        result_img.convert('RGB').save(buffer, format='PNG', quality=95)
+        buffer.seek(0)
+        image_bytes = buffer.getvalue()
+
+        filename = f"{job_id}/facade_markup_{page_number:03d}.png"
+        upload_url = upload_to_supabase(image_bytes, filename, 'image/png')
+
+        results.append({
+            "page_number": page_number,
+            "page_id": pg_id,
+            "markup_url": upload_url,
+            "net_siding_sf": round(net_siding_sf, 2),
+            "gross_facade_sf": round(gross_facade_sf, 2),
+            "openings_sf": round(openings_sf, 2),
+            "window_count": window_count,
+            "door_count": door_count,
+            "garage_count": garage_count
+        })
+
+    return jsonify({
+        "success": True,
+        "job_id": job_id,
+        "pages": results
+    })
