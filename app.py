@@ -956,37 +956,45 @@ def calculate_takeoff_for_page(page_id):
     Stores results in:
     - extraction_detection_details (individual detections)
     - extraction_elevation_calcs (aggregated per elevation)
+
+    FORMULA FIX: Gross Facade = Building Area - Roof Area
+    (Roof is excluded from siding calculations)
     """
+    import math
+
     # Get page data
     page = supabase_request('GET', 'extraction_pages', filters={'id': f'eq.{page_id}'})
     if not page:
         return {"error": "Page not found"}
     page = page[0]
-    
+
     job_id = page.get('job_id')
     elevation_name = page.get('elevation_name', 'unknown')
     extraction_data = page.get('extraction_data', {})
     predictions = extraction_data.get('raw_predictions', [])
     scale_ratio = float(page.get('scale_ratio') or 48)
     dpi = int(page.get('dpi') or 100)
-    
+
     if not predictions:
         return {"error": "No predictions for this page"}
-    
+
     # Conversion factor: pixels to real inches
     inches_per_pixel = (1.0 / dpi) * scale_ratio
-    
+
     # Delete existing detection details for this page
     supabase_request('DELETE', 'extraction_detection_details', filters={'page_id': f'eq.{page_id}'})
-    
+
     # Initialize counters
     counts = {
         'building': 0, 'window': 0, 'door': 0, 'garage': 0,
         'gable': 0, 'roof': 0, 'exterior_wall': 0
     }
+    # Track building_area and roof_area separately, then calculate gross_facade
     areas = {
-        'gross_facade_sf': 0, 'window_area_sf': 0, 'door_area_sf': 0,
-        'garage_area_sf': 0, 'gable_area_sf': 0, 'roof_area_sf': 0
+        'building_area_sf': 0,  # Raw building detection area
+        'roof_area_sf': 0,      # Roof area to subtract
+        'window_area_sf': 0, 'door_area_sf': 0,
+        'garage_area_sf': 0, 'gable_area_sf': 0
     }
     linear = {
         'window_perimeter_lf': 0, 'window_head_lf': 0, 'window_jamb_lf': 0, 'window_sill_lf': 0,
@@ -995,30 +1003,30 @@ def calculate_takeoff_for_page(page_id):
         'roof_eave_lf': 0, 'roof_rake_lf': 0
     }
     confidences = []
-    
+
     # Process each detection
     for idx, pred in enumerate(predictions):
         class_name = pred.get('class', '').lower().replace(' ', '_')
         px_width = pred.get('width', 0)
         px_height = pred.get('height', 0)
         confidence = pred.get('confidence', 0)
-        
+
         # Calculate real dimensions
         real_width_in = px_width * inches_per_pixel
         real_height_in = px_height * inches_per_pixel
         real_width_ft = real_width_in / 12
         real_height_ft = real_height_in / 12
-        
+
         # Calculate area (gables are triangles)
         is_triangle = (class_name == 'gable')
         if is_triangle:
-            area_sf = (real_width_in * real_height_in) / 144 / 2  # Triangle = base * height / 2
+            area_sf = (real_width_in * real_height_in) / 144 / 2
         else:
             area_sf = (real_width_in * real_height_in) / 144
-        
+
         # Calculate perimeter
         perimeter_lf = (real_width_in * 2 + real_height_in * 2) / 12
-        
+
         # Store detection detail
         detail = {
             'job_id': job_id,
@@ -1039,19 +1047,23 @@ def calculate_takeoff_for_page(page_id):
             'is_triangle': is_triangle
         }
         supabase_request('POST', 'extraction_detection_details', detail)
-        
+
         confidences.append(confidence)
-        
+
         # Aggregate by class
         if class_name in ['building', 'exterior_wall']:
             counts['building' if class_name == 'building' else 'exterior_wall'] += 1
-            areas['gross_facade_sf'] += area_sf
+            areas['building_area_sf'] += area_sf  # Track raw building area
+        elif class_name == 'roof':
+            counts['roof'] += 1
+            areas['roof_area_sf'] += area_sf  # Track roof to subtract
+            linear['roof_eave_lf'] += real_width_ft
         elif class_name == 'window':
             counts['window'] += 1
             areas['window_area_sf'] += area_sf
             linear['window_perimeter_lf'] += perimeter_lf
             linear['window_head_lf'] += real_width_ft
-            linear['window_jamb_lf'] += real_height_ft * 2  # Both jambs
+            linear['window_jamb_lf'] += real_height_ft * 2
             linear['window_sill_lf'] += real_width_ft
         elif class_name == 'door':
             counts['door'] += 1
@@ -1066,19 +1078,15 @@ def calculate_takeoff_for_page(page_id):
         elif class_name == 'gable':
             counts['gable'] += 1
             areas['gable_area_sf'] += area_sf
-            # Gable rake = 2 sloped edges, approximate using pythagorean
-            import math
             rake_length = math.sqrt((real_width_ft/2)**2 + real_height_ft**2) * 2
             linear['gable_rake_lf'] += rake_length
-        elif class_name == 'roof':
-            counts['roof'] += 1
-            areas['roof_area_sf'] += area_sf
-            # Roof eave = horizontal edges (top and bottom width)
-            linear['roof_eave_lf'] += real_width_ft
-    
+
+    # CRITICAL FIX: Gross Facade = Building - Roof
+    gross_facade_sf = areas['building_area_sf'] - areas['roof_area_sf']
+
     # Delete existing elevation calc for this page
     supabase_request('DELETE', 'extraction_elevation_calcs', filters={'page_id': f'eq.{page_id}'})
-    
+
     # Store elevation calculations
     elevation_calc = {
         'job_id': job_id,
@@ -1091,7 +1099,7 @@ def calculate_takeoff_for_page(page_id):
         'gable_count': counts['gable'],
         'roof_count': counts['roof'],
         'exterior_wall_count': counts['exterior_wall'],
-        'gross_facade_sf': round(areas['gross_facade_sf'], 2),
+        'gross_facade_sf': round(gross_facade_sf, 2),  # Now correctly excludes roof
         'window_area_sf': round(areas['window_area_sf'], 2),
         'door_area_sf': round(areas['door_area_sf'], 2),
         'garage_area_sf': round(areas['garage_area_sf'], 2),
@@ -1113,15 +1121,26 @@ def calculate_takeoff_for_page(page_id):
         'confidence_avg': round(sum(confidences) / len(confidences), 4) if confidences else 0
     }
     supabase_request('POST', 'extraction_elevation_calcs', elevation_calc)
-    
+
+    # Net siding = Gross Facade - Openings + Gables
+    net_siding_sf = gross_facade_sf - areas['window_area_sf'] - areas['door_area_sf'] - areas['garage_area_sf'] + areas['gable_area_sf']
+
     return {
         "success": True,
         "page_id": page_id,
         "elevation": elevation_name,
         "counts": counts,
-        "areas": {k: round(v, 2) for k, v in areas.items()},
+        "areas": {
+            'building_area_sf': round(areas['building_area_sf'], 2),
+            'roof_area_sf': round(areas['roof_area_sf'], 2),
+            'gross_facade_sf': round(gross_facade_sf, 2),  # Building - Roof
+            'window_area_sf': round(areas['window_area_sf'], 2),
+            'door_area_sf': round(areas['door_area_sf'], 2),
+            'garage_area_sf': round(areas['garage_area_sf'], 2),
+            'gable_area_sf': round(areas['gable_area_sf'], 2)
+        },
         "linear": {k: round(v, 2) for k, v in linear.items()},
-        "net_siding_sf": round(areas['gross_facade_sf'] - areas['window_area_sf'] - areas['door_area_sf'] - areas['garage_area_sf'] + areas['gable_area_sf'], 2)
+        "net_siding_sf": round(net_siding_sf, 2)
     }
 
 
@@ -1764,6 +1783,9 @@ def generate_facade_markup():
     """
     Generate facade markup from verified detection data.
     This creates a clean visualization AFTER human review.
+
+    FORMULA FIX: Gross Facade = Building Area - Roof Area
+    Roof is shown with hatching/crosshatch to indicate exclusion.
     """
     data = request.json
     job_id = data.get('job_id')
@@ -1813,13 +1835,16 @@ def generate_facade_markup():
         overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
-        gross_facade_sf = 0
+        # Track areas separately
+        building_area_sf = 0
+        roof_area_sf = 0
         openings_sf = 0
         window_count = 0
         door_count = 0
         garage_count = 0
 
         buildings = []
+        roofs = []  # Track roof detections separately
         openings = []
 
         for det in detections:
@@ -1837,7 +1862,10 @@ def generate_facade_markup():
 
             if cls == 'building':
                 buildings.append((x1, y1, x2, y2))
-                gross_facade_sf += area
+                building_area_sf += area
+            elif cls == 'roof':
+                roofs.append((x1, y1, x2, y2))
+                roof_area_sf += area
             elif cls in ['window', 'door', 'garage']:
                 openings.append((x1, y1, x2, y2, cls))
                 openings_sf += area
@@ -1848,10 +1876,24 @@ def generate_facade_markup():
                 elif cls == 'garage':
                     garage_count += 1
 
+        # CRITICAL FIX: Gross Facade = Building - Roof
+        gross_facade_sf = building_area_sf - roof_area_sf
         net_siding_sf = gross_facade_sf - openings_sf
 
+        # Draw building (facade area) in blue
         for (x1, y1, x2, y2) in buildings:
             draw.rectangle([x1, y1, x2, y2], fill=(59, 130, 246, 100), outline=(59, 130, 246, 255), width=3)
+
+        # Draw roof with hatching pattern to show exclusion (red/gray with crosshatch)
+        for (x1, y1, x2, y2) in roofs:
+            # Semi-transparent red fill to show "excluded"
+            draw.rectangle([x1, y1, x2, y2], fill=(220, 38, 38, 120), outline=(220, 38, 38, 255), width=2)
+            # Add crosshatch pattern to indicate exclusion
+            spacing = 15
+            for i in range(int(x1), int(x2), spacing):
+                draw.line([(i, y1), (min(i + (y2-y1), x2), y2)], fill=(220, 38, 38, 180), width=1)
+            for i in range(int(x1), int(x2), spacing):
+                draw.line([(i, y2), (min(i + (y2-y1), x2), y1)], fill=(220, 38, 38, 180), width=1)
 
         color_map = {
             'window': (249, 115, 22, 150),
@@ -1873,14 +1915,17 @@ def generate_facade_markup():
             font_large = ImageFont.load_default()
             font_small = ImageFont.load_default()
 
+        # Updated summary to show the calculation breakdown
         summary_lines = [
-            f"NET FACADE: {net_siding_sf:,.0f} SF",
-            f"Gross: {gross_facade_sf:,.0f} SF",
+            f"NET SIDING: {net_siding_sf:,.0f} SF",
+            f"Building: {building_area_sf:,.0f} SF - Roof: {roof_area_sf:,.0f} SF",
+            f"Gross Facade: {gross_facade_sf:,.0f} SF",
             f"Openings: {openings_sf:,.0f} SF",
             f"Win: {window_count} | Door: {door_count} | Garage: {garage_count}"
         ]
 
-        draw_result.rectangle([10, 10, 350, 120], fill=(0, 0, 0, 200))
+        # Larger info box to fit new line
+        draw_result.rectangle([10, 10, 400, 145], fill=(0, 0, 0, 200))
 
         y_pos = 20
         draw_result.text((20, y_pos), summary_lines[0], fill=(59, 130, 246), font=font_large)
@@ -1889,14 +1934,21 @@ def generate_facade_markup():
             draw_result.text((20, y_pos), line, fill=(255, 255, 255), font=font_small)
             y_pos += 22
 
+        # Updated legend to include Roof (Excluded)
         legend_y = img.size[1] - 40
-        legend_items = [("Facade", (59, 130, 246)), ("Window", (249, 115, 22)), ("Door", (34, 197, 94)), ("Garage", (234, 179, 8))]
+        legend_items = [
+            ("Facade", (59, 130, 246)),
+            ("Roof (Excl)", (220, 38, 38)),
+            ("Window", (249, 115, 22)),
+            ("Door", (34, 197, 94)),
+            ("Garage", (234, 179, 8))
+        ]
 
         x_pos = 20
         for label, color in legend_items:
             draw_result.rectangle([x_pos, legend_y, x_pos + 20, legend_y + 20], fill=color)
             draw_result.text((x_pos + 25, legend_y), label, fill=(255, 255, 255), font=font_small)
-            x_pos += 100
+            x_pos += 110  # Slightly wider spacing for new item
 
         buffer = BytesIO()
         result_img.convert('RGB').save(buffer, format='PNG', quality=95)
@@ -1911,6 +1963,8 @@ def generate_facade_markup():
             "page_id": pg_id,
             "markup_url": upload_url,
             "net_siding_sf": round(net_siding_sf, 2),
+            "building_area_sf": round(building_area_sf, 2),
+            "roof_area_sf": round(roof_area_sf, 2),
             "gross_facade_sf": round(gross_facade_sf, 2),
             "openings_sf": round(openings_sf, 2),
             "window_count": window_count,
