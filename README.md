@@ -137,3 +137,4 @@ The `/extract` endpoint returns HOVER-compatible measurements:
 }
 ```
 # v2
+# CORS enabled
