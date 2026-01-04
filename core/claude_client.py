@@ -613,7 +613,7 @@ Return ONLY the JSON object, no additional text.'''
         # Calculate total if not provided
         if not data.get('total_roof_area_sf') and data['roof_sections']:
             data['total_roof_area_sf'] = sum(
-                s.get('area_sf', 0) for s in data['roof_sections']
+                s.get('area_sf') or 0 for s in data['roof_sections']
             )
         
         # Set dominant pitch if not provided
