@@ -4,11 +4,13 @@ Extraction service - main processing orchestration
 
 from database import (
     get_job, update_job, update_page,
-    get_classified_pages, get_elevation_pages, get_schedule_pages
+    get_classified_pages, get_elevation_pages, get_schedule_pages,
+    supabase_request
 )
-from core import detect_with_roboflow, ocr_schedule_with_claude
+from core import detect_with_roboflow, ocr_schedule_with_claude, extract_elevation_dimensions
 from geometry import calculate_real_measurements
 from config import config
+import datetime
 
 
 def process_job_background(job_id, scale_override=None, generate_markups=True):
@@ -88,6 +90,21 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
                 })
                 
                 print(f"[{job_id}] Processed elevation: {measurements['counts'].get('window', 0)} windows", flush=True)
+                
+                # Run OCR on elevation to extract wall heights, callouts, dimensions
+                try:
+                    print(f"[{job_id}] Running OCR on elevation page {page_id}...", flush=True)
+                    ocr_result = extract_elevation_dimensions(image_url)
+                    
+                    if ocr_result and 'error' not in ocr_result:
+                        # Store OCR results
+                        _store_ocr_results(job_id, page_id, ocr_result)
+                        print(f"[{job_id}] OCR complete: {len(ocr_result.get('wall_heights', []))} wall heights, {len(ocr_result.get('element_callouts', []))} callouts", flush=True)
+                    else:
+                        print(f"[{job_id}] OCR returned no data for page {page_id}", flush=True)
+                except Exception as ocr_err:
+                    print(f"[{job_id}] OCR failed for page {page_id}: {ocr_err}", flush=True)
+                    # Don't fail the whole extraction if OCR fails
             else:
                 print(f"[{job_id}] Detection failed for page {page_id}: {detection.get('error')}", flush=True)
                 update_page(page_id, {'status': 'failed'})
@@ -135,6 +152,17 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
         print(f"[{job_id}] Building cross-references...", flush=True)
         build_cross_references(job_id)
         
+        # Auto-run data fusion to combine OCR + detections + schedules
+        try:
+            from services.fusion_service import fuse_job_data
+            print(f"[{job_id}] Running data fusion...", flush=True)
+            fusion_results = fuse_job_data(job_id)
+            if fusion_results and 'error' not in fusion_results:
+                print(f"[{job_id}] Fusion complete: {fusion_results.get('total_callouts_matched', 0)} callouts matched, {fusion_results.get('total_schedule_matches', 0)} schedule matches", flush=True)
+        except Exception as fusion_err:
+            print(f"[{job_id}] Fusion failed: {fusion_err}", flush=True)
+            # Don't fail the job if fusion fails
+        
         print(f"[{job_id}] Processing complete!", flush=True)
     
     except Exception as e:
@@ -142,3 +170,60 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
         import traceback
         traceback.print_exc()
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
+
+
+def _store_ocr_results(job_id, page_id, ocr_result):
+    """
+    Store OCR extraction results in the database.
+    
+    Args:
+        job_id: Job UUID
+        page_id: Page UUID
+        ocr_result: Dict from extract_elevation_dimensions()
+    """
+    ocr_record = {
+        'job_id': job_id,
+        'page_id': page_id,
+        'wall_heights': ocr_result.get('wall_heights', []),
+        'dimension_text': ocr_result.get('dimension_text', []),
+        'element_callouts': ocr_result.get('element_callouts', []),
+        'level_markers': ocr_result.get('level_markers', []),
+        'eave_height_ft': ocr_result.get('eave_height_ft'),
+        'ridge_height_ft': ocr_result.get('ridge_height_ft'),
+        'average_wall_height_ft': ocr_result.get('average_wall_height_ft'),
+        'total_building_height_ft': ocr_result.get('total_building_height_ft'),
+        'extraction_confidence': ocr_result.get('extraction_confidence'),
+        'processing_time_ms': ocr_result.get('processing_time_ms'),
+        'claude_model': ocr_result.get('raw_response', {}).get('model', 'unknown')
+    }
+    
+    # Check if record exists
+    existing = supabase_request('GET', 'extraction_ocr_data', filters={
+        'page_id': f'eq.{page_id}'
+    })
+    
+    if existing:
+        # Update existing
+        supabase_request('PATCH', 'extraction_ocr_data',
+                        data=ocr_record,
+                        filters={'page_id': f'eq.{page_id}'})
+    else:
+        # Insert new
+        supabase_request('POST', 'extraction_ocr_data', ocr_record)
+    
+    # Update page OCR status
+    update_page(page_id, {
+        'ocr_status': 'complete',
+        'ocr_processed_at': datetime.datetime.utcnow().isoformat()
+    })
+    
+    # Update elevation calcs with wall height if found
+    if ocr_result.get('average_wall_height_ft'):
+        supabase_request('PATCH', 'extraction_elevation_calcs',
+                        data={
+                            'wall_height_ft': ocr_result['average_wall_height_ft'],
+                            'wall_height_source': 'ocr',
+                            'ocr_eave_height_ft': ocr_result.get('eave_height_ft'),
+                            'ocr_ridge_height_ft': ocr_result.get('ridge_height_ft')
+                        },
+                        filters={'page_id': f'eq.{page_id}'})
