@@ -41,9 +41,9 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.0",
+        "version": "4.1",
         "architecture": "modular",
-        "features": ["markups", "scale_extraction", "cross_reference", "floor_plan_analysis"]
+        "features": ["markups", "scale_extraction", "cross_reference", "floor_plan_analysis", "elevation_ocr"]
     })
 
 
@@ -280,6 +280,349 @@ def analyze_floor_plan():
         return jsonify(analyze_floor_plan_for_job(data['job_id']))
     
     return jsonify({"error": "page_id or job_id required"}), 400
+
+
+# ============================================================
+# OCR EXTRACTION ENDPOINTS (Phase 2)
+# ============================================================
+
+@app.route('/extract-dimensions', methods=['POST'])
+def extract_dimensions():
+    """
+    Extract dimension text from an elevation page using Claude Vision OCR.
+    
+    This extracts:
+    - Wall heights
+    - Window/door callouts
+    - Dimension strings with locations
+    - Level markers
+    - Eave/ridge heights
+    
+    Request body:
+        - page_id: UUID of elevation page
+        OR
+        - image_url: Direct URL to image
+    
+    Returns:
+        OCR extraction results with confidence scores
+    """
+    from core import extract_elevation_dimensions
+    
+    data = request.json
+    
+    # Get image URL
+    if data.get('page_id'):
+        page = get_page(data['page_id'])
+        if not page:
+            return jsonify({"error": "Page not found"}), 404
+        image_url = page.get('image_url')
+        if not image_url:
+            return jsonify({"error": "Page has no image URL"}), 400
+    elif data.get('image_url'):
+        image_url = data['image_url']
+    else:
+        return jsonify({"error": "page_id or image_url required"}), 400
+    
+    # Run OCR extraction
+    result = extract_elevation_dimensions(image_url)
+    
+    # If page_id provided, store results in database
+    if data.get('page_id') and not result.get('error'):
+        _store_ocr_results(data['page_id'], result)
+    
+    return jsonify(result)
+
+
+@app.route('/ocr-job', methods=['POST'])
+def ocr_job():
+    """
+    Run OCR extraction on all elevation pages in a job.
+    
+    Request body:
+        - job_id: UUID of job
+        - reprocess: bool - if true, reprocess pages with existing OCR (default: false)
+    
+    Returns:
+        Summary of OCR extraction for all pages
+    """
+    from core import extract_elevation_dimensions
+    
+    data = request.json
+    if not data.get('job_id'):
+        return jsonify({"error": "job_id required"}), 400
+    
+    job_id = data['job_id']
+    reprocess = data.get('reprocess', False)
+    
+    # Get elevation pages
+    pages = get_elevation_pages(job_id)
+    if not pages:
+        return jsonify({"error": "No elevation pages found"}), 404
+    
+    results = []
+    
+    for page in pages:
+        page_id = page['id']
+        ocr_status = page.get('ocr_status')
+        
+        # Skip if already processed (unless reprocess=true)
+        if ocr_status == 'complete' and not reprocess:
+            results.append({
+                "page_id": page_id,
+                "status": "skipped",
+                "reason": "already processed"
+            })
+            continue
+        
+        image_url = page.get('image_url')
+        if not image_url:
+            results.append({
+                "page_id": page_id,
+                "status": "error",
+                "error": "no image URL"
+            })
+            continue
+        
+        # Update status to processing
+        update_page(page_id, {'ocr_status': 'processing'})
+        
+        # Run OCR
+        ocr_result = extract_elevation_dimensions(image_url)
+        
+        if ocr_result.get('error'):
+            update_page(page_id, {'ocr_status': 'failed'})
+            results.append({
+                "page_id": page_id,
+                "status": "error",
+                "error": ocr_result['error']
+            })
+        else:
+            # Store results
+            _store_ocr_results(page_id, ocr_result)
+            results.append({
+                "page_id": page_id,
+                "status": "success",
+                "wall_heights_found": len(ocr_result.get('wall_heights', [])),
+                "callouts_found": len(ocr_result.get('element_callouts', [])),
+                "dimensions_found": len(ocr_result.get('dimension_text', [])),
+                "confidence": ocr_result.get('extraction_confidence')
+            })
+    
+    successful = len([r for r in results if r.get('status') == 'success'])
+    
+    return jsonify({
+        "job_id": job_id,
+        "pages_processed": len(results),
+        "successful": successful,
+        "results": results
+    })
+
+
+@app.route('/ocr-data', methods=['GET'])
+def get_ocr_data():
+    """
+    Get OCR extraction data for a page or job.
+    
+    Query params:
+        - page_id: UUID of page
+        OR
+        - job_id: UUID of job (returns all pages)
+    
+    Returns:
+        OCR data from extraction_ocr_data table
+    """
+    page_id = request.args.get('page_id')
+    job_id = request.args.get('job_id')
+    
+    if page_id:
+        data = supabase_request('GET', 'extraction_ocr_data', filters={
+            'page_id': f'eq.{page_id}'
+        })
+        return jsonify(data[0] if data else {"error": "No OCR data found"})
+    
+    elif job_id:
+        data = supabase_request('GET', 'v_page_ocr_summary', filters={
+            'job_id': f'eq.{job_id}',
+            'order': 'page_number'
+        })
+        return jsonify({"job_id": job_id, "pages": data or []})
+    
+    return jsonify({"error": "page_id or job_id required"}), 400
+
+
+def _store_ocr_results(page_id, ocr_result):
+    """
+    Store OCR extraction results in database.
+    
+    - Inserts/updates extraction_ocr_data
+    - Updates extraction_pages.ocr_status
+    - Updates extraction_elevation_calcs with wall height
+    """
+    import datetime
+    
+    page = get_page(page_id)
+    if not page:
+        return
+    
+    job_id = page.get('job_id')
+    
+    # Prepare OCR data record
+    ocr_record = {
+        'job_id': job_id,
+        'page_id': page_id,
+        'wall_heights': ocr_result.get('wall_heights', []),
+        'dimension_text': ocr_result.get('dimension_text', []),
+        'element_callouts': ocr_result.get('element_callouts', []),
+        'level_markers': ocr_result.get('level_markers', []),
+        'eave_height_ft': ocr_result.get('eave_height_ft'),
+        'ridge_height_ft': ocr_result.get('ridge_height_ft'),
+        'average_wall_height_ft': ocr_result.get('average_wall_height_ft'),
+        'total_building_height_ft': ocr_result.get('total_building_height_ft'),
+        'extraction_confidence': ocr_result.get('extraction_confidence'),
+        'claude_model': 'claude-sonnet-4-20250514',
+        'processing_time_ms': ocr_result.get('processing_time_ms')
+    }
+    
+    # Check if OCR data already exists for this page
+    existing = supabase_request('GET', 'extraction_ocr_data', filters={
+        'page_id': f'eq.{page_id}'
+    })
+    
+    if existing:
+        # Update existing record
+        supabase_request('PATCH', 'extraction_ocr_data', 
+                        data=ocr_record,
+                        filters={'page_id': f'eq.{page_id}'})
+        ocr_data_id = existing[0]['id']
+    else:
+        # Insert new record
+        result = supabase_request('POST', 'extraction_ocr_data', ocr_record)
+        ocr_data_id = result[0]['id'] if result else None
+    
+    # Update page status
+    update_page(page_id, {
+        'ocr_status': 'complete',
+        'ocr_processed_at': datetime.datetime.utcnow().isoformat()
+    })
+    
+    # Update elevation calcs with wall height if found
+    if ocr_result.get('average_wall_height_ft'):
+        supabase_request('PATCH', 'extraction_elevation_calcs',
+                        data={
+                            'wall_height_ft': ocr_result['average_wall_height_ft'],
+                            'wall_height_source': 'ocr',
+                            'ocr_data_id': ocr_data_id,
+                            'ocr_eave_height_ft': ocr_result.get('eave_height_ft'),
+                            'ocr_ridge_height_ft': ocr_result.get('ridge_height_ft')
+                        },
+                        filters={'page_id': f'eq.{page_id}'})
+
+
+# ============================================================
+# FUSION ENDPOINTS (Phase 2)
+# ============================================================
+
+@app.route('/fuse-data', methods=['POST'])
+def fuse_data():
+    """
+    Run data fusion on a page or job.
+    
+    Combines OCR callouts with Roboflow detections and schedule data
+    to improve dimension accuracy.
+    
+    Request body:
+        - page_id: UUID of page to fuse
+        OR
+        - job_id: UUID of job (fuses all elevation pages)
+    
+    Returns:
+        Fusion results with matched callouts, dimension sources, discrepancies
+    """
+    from services.fusion_service import fuse_page_data, fuse_job_data
+    
+    data = request.json
+    
+    if data.get('page_id'):
+        return jsonify(fuse_page_data(data['page_id']))
+    elif data.get('job_id'):
+        return jsonify(fuse_job_data(data['job_id']))
+    
+    return jsonify({"error": "page_id or job_id required"}), 400
+
+
+@app.route('/fusion-summary', methods=['GET'])
+def fusion_summary():
+    """
+    Get fusion summary for a job.
+    
+    Shows breakdown of dimension sources and discrepancies.
+    
+    Query params:
+        - job_id: UUID of job
+    
+    Returns:
+        Summary statistics
+    """
+    from services.fusion_service import get_fusion_summary
+    
+    job_id = request.args.get('job_id')
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    
+    return jsonify(get_fusion_summary(job_id))
+
+
+@app.route('/dimension-sources', methods=['GET'])
+def get_dimension_sources():
+    """
+    Get all dimension sources for a detection.
+    
+    Query params:
+        - detection_id: UUID of detection
+    
+    Returns:
+        List of dimension sources with priorities
+    """
+    detection_id = request.args.get('detection_id')
+    if not detection_id:
+        return jsonify({"error": "detection_id required"}), 400
+    
+    sources = supabase_request('GET', 'extraction_dimension_sources', filters={
+        'detection_id': f'eq.{detection_id}',
+        'order': 'source_priority'
+    })
+    
+    return jsonify({"detection_id": detection_id, "sources": sources or []})
+
+
+@app.route('/detections-with-sources', methods=['GET'])
+def get_detections_with_sources():
+    """
+    Get detections with their dimension source info.
+    
+    Query params:
+        - page_id: UUID of page
+        OR
+        - job_id: UUID of job
+    
+    Returns:
+        Detections with dimension_source, matched_tag, discrepancy info
+    """
+    page_id = request.args.get('page_id')
+    job_id = request.args.get('job_id')
+    
+    if page_id:
+        data = supabase_request('GET', 'v_detection_with_sources', filters={
+            'page_id': f'eq.{page_id}'
+        })
+    elif job_id:
+        data = supabase_request('GET', 'v_detection_with_sources', filters={
+            'job_id': f'eq.{job_id}'
+        })
+    else:
+        return jsonify({"error": "page_id or job_id required"}), 400
+    
+    return jsonify({"detections": data or []})
 
 
 # ============================================================

@@ -20,6 +20,11 @@ from services.floor_plan_service import (
     analyze_floor_plan_for_job,
     analyze_single_floor_plan
 )
+from services.fusion_service import (
+    fuse_page_data,
+    fuse_job_data,
+    get_fusion_summary
+)
 
 __all__ = [
     # PDF
@@ -46,5 +51,10 @@ __all__ = [
     
     # Floor plan
     'analyze_floor_plan_for_job',
-    'analyze_single_floor_plan'
+    'analyze_single_floor_plan',
+    
+    # Fusion (Phase 2)
+    'fuse_page_data',
+    'fuse_job_data',
+    'get_fusion_summary'
 ]
