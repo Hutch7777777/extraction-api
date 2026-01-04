@@ -530,31 +530,22 @@ IMPORTANT:
 Return ONLY the JSON object, no additional text.'''
 
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=2000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "url",
-                                "url": image_url
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt
-                        }
-                    ]
-                }]
-            )
+            # Download and encode image (same pattern as other methods)
+            image_base64 = self._download_and_encode(image_url)
+            result = self._make_request(image_base64, prompt, max_tokens=2000)
             
             processing_time = int((time.time() - start_time) * 1000)
             
+            if 'error' in result:
+                return {
+                    "error": result['error'],
+                    "roof_sections": [],
+                    "linear_elements": {},
+                    "extraction_confidence": 0
+                }
+            
             # Parse response
-            text = response.content[0].text
+            text = result.get('content', [{}])[0].get('text', '{}')
             
             # Clean up JSON
             if "```json" in text:
@@ -568,10 +559,7 @@ Return ONLY the JSON object, no additional text.'''
             data = self._validate_roof_data(data)
             
             data['processing_time_ms'] = processing_time
-            data['raw_response'] = {
-                'model': response.model,
-                'usage': response.usage._asdict() if hasattr(response.usage, '_asdict') else {}
-            }
+            data['raw_response'] = result
             
             return data
             
