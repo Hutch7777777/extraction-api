@@ -22,6 +22,49 @@ from database import (
 
 
 # ============================================================
+# DIMENSION SOURCE HELPERS
+# ============================================================
+
+def _get_source_indicator(source):
+    """
+    Get a short indicator for dimension source.
+    
+    Args:
+        source: 'schedule', 'ocr', 'calculated', 'manual'
+    
+    Returns:
+        Short string like '[S]', '[O]', '' (no indicator for calculated)
+    """
+    indicators = {
+        'schedule': ' [S]',   # Schedule - highest confidence
+        'manual': ' [M]',     # Manual override
+        'ocr': ' [O]',        # OCR extracted
+        'calculated': ''      # Default - no indicator needed
+    }
+    return indicators.get(source, '')
+
+
+def _get_source_color(source, default_color):
+    """
+    Get color for dimension source (visual coding).
+    
+    Args:
+        source: 'schedule', 'ocr', 'calculated', 'manual'
+        default_color: RGB tuple to use as fallback
+    
+    Returns:
+        RGB tuple for text color
+    """
+    colors = {
+        'schedule': (34, 139, 34),    # Forest green - trusted
+        'manual': (0, 100, 200),       # Blue - user verified
+        'ocr': (255, 140, 0),          # Orange - extracted
+        'calculated': default_color    # Use class color
+    }
+    return colors.get(source, default_color)
+
+
+# ============================================================
 # SHAPE DRAWING HELPERS
 # ============================================================
 
@@ -584,12 +627,38 @@ def generate_comprehensive_markup(page_id):
         
         # Draw dimension label with background
         if cls in ['window', 'door', 'garage']:
-            label = f"{width_ft:.1f}'x{height_ft:.1f}'"
+            # Get dimension source indicator
+            dim_source = det.get('dimension_source', 'calculated')
+            source_indicator = _get_source_indicator(dim_source)
+            
+            # Use final dimensions if available (from fusion), otherwise real dimensions
+            final_width = det.get('final_width_in')
+            final_height = det.get('final_height_in')
+            
+            if final_width and final_height:
+                # Convert inches to feet for display
+                disp_width = final_width / 12.0
+                disp_height = final_height / 12.0
+            else:
+                disp_width = width_ft
+                disp_height = height_ft
+            
+            # Build label with source indicator
+            label = f"{disp_width:.1f}'x{disp_height:.1f}'{source_indicator}"
+            
+            # Color code by source
+            label_color = _get_source_color(dim_source, colors['rgb'])
+            
             label_x = x1 + 3
             label_y = y1 + 2
             bbox = label_draw.textbbox((label_x, label_y), label, font=font_small)
             label_draw.rectangle([bbox[0] - 2, bbox[1] - 1, bbox[2] + 2, bbox[3] + 1], fill=(255, 255, 255, 200))
-            label_draw.text((label_x, label_y), label, fill=colors['rgb'], font=font_small)
+            label_draw.text((label_x, label_y), label, fill=label_color, font=font_small)
+            
+            # Add discrepancy warning if present
+            if det.get('has_discrepancy'):
+                warn_x = label_x + bbox[2] - bbox[0] + 4
+                label_draw.text((warn_x, label_y), "⚠", fill=(255, 165, 0), font=font_small)
         
         elif cls == 'gable':
             # Special label for gables: show area and rake
@@ -626,7 +695,7 @@ def generate_comprehensive_markup(page_id):
     legend_x = 10
     legend_y = 10
     legend_width = 300
-    legend_height = 260
+    legend_height = 310  # Increased for dimension source key
     
     legend_overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
     legend_draw = ImageDraw.Draw(legend_overlay)
@@ -696,6 +765,14 @@ def generate_comprehensive_markup(page_id):
     draw.text((legend_x + 10, y_offset), f"+ Gables: {gable:.0f} SF (△ {gable_rake:.1f}' rake)", fill='#000000', font=font_small)
     y_offset += line_height
     draw.text((legend_x + 10, y_offset), f"= NET SIDING: {net_siding:.0f} SF", fill='#000000', font=font_large)
+    
+    # Dimension source key
+    y_offset += line_height + 8
+    draw.line([(legend_x + 10, y_offset), (legend_x + legend_width - 10, y_offset)], fill='#CCCCCC', width=1)
+    y_offset += 6
+    draw.text((legend_x + 10, y_offset), "Dimension Sources:", fill='#666666', font=font_small)
+    y_offset += line_height - 4
+    draw.text((legend_x + 15, y_offset), "[S]=Schedule  [O]=OCR  ⚠=Discrepancy", fill='#888888', font=font_small)
     
     # Convert to RGB for saving
     final_img = img.convert('RGB')
