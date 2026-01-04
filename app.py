@@ -41,9 +41,9 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.2",
+        "version": "4.3",
         "architecture": "modular",
-        "features": ["markups", "scale_extraction", "cross_reference", "floor_plan_analysis", "elevation_ocr", "dimension_sources"]
+        "features": ["markups", "scale_extraction", "cross_reference", "floor_plan_analysis", "elevation_ocr", "dimension_sources", "roof_intelligence"]
     })
 
 
@@ -623,6 +623,175 @@ def get_detections_with_sources():
         return jsonify({"error": "page_id or job_id required"}), 400
     
     return jsonify({"detections": data or []})
+
+
+# ============================================================
+# ROOF INTELLIGENCE ENDPOINTS (Phase 3)
+# ============================================================
+
+@app.route('/extract-roof-data', methods=['POST'])
+def extract_roof_data():
+    """
+    Extract roof data from a roof plan page using Claude Vision.
+    
+    Request body:
+        - page_id: UUID of roof plan page
+        OR
+        - image_url: Direct URL to roof plan image
+    
+    Returns:
+        Extracted roof sections, pitches, and linear elements
+    """
+    from core import extract_roof_plan_data
+    from services.roof_service import process_roof_plan
+    
+    data = request.json
+    
+    if data.get('page_id'):
+        # Process and store in database
+        return jsonify(process_roof_plan(data['page_id']))
+    
+    elif data.get('image_url'):
+        # Just run OCR, don't store
+        result = extract_roof_plan_data(data['image_url'])
+        return jsonify(result)
+    
+    return jsonify({"error": "page_id or image_url required"}), 400
+
+
+@app.route('/roof-job', methods=['POST'])
+def process_roof_job():
+    """
+    Process all roof plan pages in a job.
+    
+    Request body:
+        - job_id: UUID of job
+        - reprocess: Boolean, reprocess already-processed pages (optional)
+    
+    Returns:
+        Summary of pages processed with totals
+    """
+    from services.roof_service import process_roof_plans_for_job
+    
+    data = request.json
+    job_id = data.get('job_id')
+    
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    
+    return jsonify(process_roof_plans_for_job(job_id))
+
+
+@app.route('/roof-summary', methods=['GET'])
+def get_roof_summary_endpoint():
+    """
+    Get roof summary for a job.
+    
+    Query params:
+        - job_id: UUID of job
+    
+    Returns:
+        Roof summary with sections, areas, linear elements, and derived calculations
+    """
+    from services.roof_service import get_roof_summary
+    
+    job_id = request.args.get('job_id')
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    
+    return jsonify(get_roof_summary(job_id))
+
+
+@app.route('/calculate-pitch', methods=['POST'])
+def calculate_pitch():
+    """
+    Calculate pitch factor and related values.
+    
+    Request body:
+        - pitch: Pitch notation like '6:12'
+        - projected_area_sf: Optional - calculate true area
+    
+    Returns:
+        Pitch factor, true area, waste factor, angle in degrees
+    """
+    from services.roof_service import (
+        calculate_pitch_factor, calculate_true_area,
+        get_pitch_waste_factor, pitch_to_degrees
+    )
+    
+    data = request.json
+    pitch = data.get('pitch')
+    
+    if not pitch:
+        return jsonify({"error": "pitch required"}), 400
+    
+    factor = calculate_pitch_factor(pitch)
+    result = {
+        "pitch": pitch,
+        "pitch_factor": factor,
+        "waste_factor": get_pitch_waste_factor(pitch),
+        "degrees": pitch_to_degrees(pitch)
+    }
+    
+    if data.get('projected_area_sf'):
+        result['projected_area_sf'] = data['projected_area_sf']
+        result['true_area_sf'] = calculate_true_area(data['projected_area_sf'], pitch)
+    
+    return jsonify(result)
+
+
+@app.route('/calculate-roofing', methods=['POST'])
+def calculate_roofing():
+    """
+    Calculate roofing materials needed.
+    
+    Request body:
+        - true_area_sf: True roof surface area
+        - pitch: Optional pitch for auto waste factor
+        - waste_factor: Optional override waste factor (0.10 = 10%)
+        - eave_lf: Eave length for soffit/starter
+        - ridge_lf: Ridge length
+        - rake_lf: Rake length
+        - hip_lf: Hip length
+        - overhang_in: Overhang depth in inches (default 12)
+    
+    Returns:
+        Calculated quantities for all roofing components
+    """
+    from services.roof_service import (
+        calculate_roofing_squares, calculate_soffit_area,
+        calculate_fascia_lf, calculate_drip_edge_lf,
+        calculate_starter_lf, calculate_ridge_cap_lf
+    )
+    
+    data = request.json
+    true_area = data.get('true_area_sf', 0)
+    pitch = data.get('pitch')
+    waste = data.get('waste_factor')
+    eave_lf = data.get('eave_lf', 0)
+    ridge_lf = data.get('ridge_lf', 0)
+    rake_lf = data.get('rake_lf', 0)
+    hip_lf = data.get('hip_lf', 0)
+    overhang_in = data.get('overhang_in', 12)
+    
+    return jsonify({
+        "input": {
+            "true_area_sf": true_area,
+            "eave_lf": eave_lf,
+            "ridge_lf": ridge_lf,
+            "rake_lf": rake_lf,
+            "hip_lf": hip_lf
+        },
+        "calculations": {
+            "roofing_squares": calculate_roofing_squares(true_area, waste, pitch),
+            "soffit_sf": calculate_soffit_area(eave_lf, overhang_in),
+            "soffit_lf": eave_lf,
+            "fascia_lf": calculate_fascia_lf(eave_lf, rake_lf),
+            "drip_edge_lf": calculate_drip_edge_lf(eave_lf, rake_lf),
+            "starter_lf": calculate_starter_lf(eave_lf),
+            "ridge_cap_lf": calculate_ridge_cap_lf(ridge_lf, hip_lf)
+        }
+    })
 
 
 # ============================================================

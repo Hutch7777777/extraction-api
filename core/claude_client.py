@@ -460,6 +460,211 @@ IMPORTANT NOTES:
         
         return data
 
+    def extract_roof_plan_data(self, image_url):
+        """
+        Extract roof data from a roof plan drawing.
+        
+        Extracts:
+        - Roof sections with areas
+        - Pitch notations (6:12, 8:12, etc.)
+        - Linear elements: eave, ridge, valley, hip, rake
+        - Total areas
+        
+        Args:
+            image_url: URL of the roof plan image
+            
+        Returns:
+            Dict with roof sections and linear measurements
+        """
+        import time
+        start_time = time.time()
+        
+        prompt = '''Analyze this roof plan drawing and extract all roof data.
+
+Look for:
+1. ROOF SECTIONS - Each distinct roof area with its square footage
+2. PITCH NOTATIONS - Numbers like "6:12", "8:12", "4/12" indicating roof slope
+3. LINEAR MEASUREMENTS:
+   - Eave lengths (bottom edges of roof)
+   - Ridge lengths (peak/top lines)
+   - Valley lengths (inside corners where roof planes meet)
+   - Hip lengths (outside corners/edges going up)
+   - Rake lengths (sloped edges at gable ends)
+4. TOTAL ROOF AREA if shown
+5. Any material specifications
+
+Return a JSON object with this EXACT structure:
+{
+  "roof_sections": [
+    {
+      "section_name": "Main Roof",
+      "area_sf": 1850,
+      "pitch": "6:12",
+      "notes": "any relevant notes"
+    }
+  ],
+  "pitches_found": [
+    {"notation": "6:12", "location": "main roof"},
+    {"notation": "4:12", "location": "porch"}
+  ],
+  "linear_elements": {
+    "eave_lf": 180,
+    "ridge_lf": 65,
+    "valley_lf": 24,
+    "hip_lf": 0,
+    "rake_lf": 48
+  },
+  "total_roof_area_sf": 2300,
+  "dominant_pitch": "6:12",
+  "extraction_confidence": 0.85,
+  "notes": "Description of what was found on the plan"
+}
+
+IMPORTANT:
+- If a value is not visible or cannot be determined, use null
+- Convert all measurements to the units specified (SF for area, LF for linear)
+- Parse dimension strings like "45'-6"" to decimal feet (45.5)
+- If only one pitch is shown, that is the dominant pitch
+- Sum all section areas for total if not explicitly shown
+
+Return ONLY the JSON object, no additional text.'''
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": image_url
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }]
+            )
+            
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            # Parse response
+            text = response.content[0].text
+            
+            # Clean up JSON
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0]
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0]
+            
+            data = json.loads(text.strip())
+            
+            # Validate and enhance data
+            data = self._validate_roof_data(data)
+            
+            data['processing_time_ms'] = processing_time
+            data['raw_response'] = {
+                'model': response.model,
+                'usage': response.usage._asdict() if hasattr(response.usage, '_asdict') else {}
+            }
+            
+            return data
+            
+        except json.JSONDecodeError as e:
+            return {
+                "error": f"JSON parse error: {str(e)}",
+                "roof_sections": [],
+                "linear_elements": {},
+                "extraction_confidence": 0
+            }
+        except Exception as e:
+            return {
+                "error": str(e),
+                "roof_sections": [],
+                "linear_elements": {},
+                "extraction_confidence": 0
+            }
+    
+    def _validate_roof_data(self, data):
+        """
+        Validate and enhance roof plan extraction data.
+        
+        - Ensures required fields exist
+        - Calculates pitch factors
+        - Validates measurements
+        """
+        # Ensure required structures exist
+        data.setdefault('roof_sections', [])
+        data.setdefault('pitches_found', [])
+        data.setdefault('linear_elements', {})
+        
+        # Ensure linear elements has all fields
+        le = data['linear_elements']
+        le.setdefault('eave_lf', None)
+        le.setdefault('ridge_lf', None)
+        le.setdefault('valley_lf', None)
+        le.setdefault('hip_lf', None)
+        le.setdefault('rake_lf', None)
+        
+        # Calculate pitch factors for each section
+        for section in data['roof_sections']:
+            pitch = section.get('pitch')
+            if pitch:
+                factor = self._calculate_pitch_factor(pitch)
+                section['pitch_factor'] = factor
+                
+                # Calculate true area if we have projected area
+                if section.get('area_sf') and factor:
+                    section['true_area_sf'] = round(section['area_sf'] * factor, 1)
+        
+        # Calculate total if not provided
+        if not data.get('total_roof_area_sf') and data['roof_sections']:
+            data['total_roof_area_sf'] = sum(
+                s.get('area_sf', 0) for s in data['roof_sections']
+            )
+        
+        # Set dominant pitch if not provided
+        if not data.get('dominant_pitch') and data['pitches_found']:
+            data['dominant_pitch'] = data['pitches_found'][0].get('notation')
+        
+        # Ensure confidence
+        data.setdefault('extraction_confidence', 0.5)
+        
+        return data
+    
+    def _calculate_pitch_factor(self, pitch_notation):
+        """
+        Calculate pitch factor from notation like '6:12' or '6/12'.
+        
+        pitch_factor = sqrt(1 + (rise/run)^2)
+        
+        Args:
+            pitch_notation: String like '6:12', '6/12', '6-12'
+            
+        Returns:
+            Pitch factor as float, or None if unparseable
+        """
+        import re
+        import math
+        
+        if not pitch_notation:
+            return None
+        
+        # Try to parse rise:run
+        match = re.match(r'(\d+)\s*[:/\-]\s*(\d+)', str(pitch_notation))
+        if match:
+            rise = int(match.group(1))
+            run = int(match.group(2))
+            if run > 0:
+                return round(math.sqrt(1 + (rise / run) ** 2), 3)
+        
+        return None
+
 
 # Singleton instance
 claude_client = ClaudeClient()
@@ -484,3 +689,8 @@ def analyze_floor_plan_corners(image_url):
 def extract_elevation_dimensions(image_url):
     """Extract dimensions from elevation drawing using Claude Vision"""
     return claude_client.extract_elevation_dimensions(image_url)
+
+
+def extract_roof_plan_data(image_url):
+    """Extract roof data from roof plan using Claude Vision"""
+    return claude_client.extract_roof_plan_data(image_url)

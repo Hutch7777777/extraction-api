@@ -25,6 +25,15 @@ from services.fusion_service import (
     fuse_job_data,
     get_fusion_summary
 )
+from services.roof_service import (
+    process_roof_plan,
+    process_roof_plans_for_job,
+    get_roof_summary,
+    calculate_pitch_factor,
+    calculate_true_area,
+    calculate_soffit_area,
+    calculate_roofing_squares
+)
 
 __all__ = [
     # PDF
@@ -56,5 +65,14 @@ __all__ = [
     # Fusion (Phase 2)
     'fuse_page_data',
     'fuse_job_data',
-    'get_fusion_summary'
+    'get_fusion_summary',
+    
+    # Roof Intelligence (Phase 3)
+    'process_roof_plan',
+    'process_roof_plans_for_job',
+    'get_roof_summary',
+    'calculate_pitch_factor',
+    'calculate_true_area',
+    'calculate_soffit_area',
+    'calculate_roofing_squares'
 ]

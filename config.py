@@ -34,7 +34,7 @@ class Config:
     CORS_ORIGINS = ['http://localhost:3000', 'https://*.vercel.app']
     
     # Valid page types
-    VALID_PAGE_TYPES = {'elevation', 'schedule', 'floor_plan', 'section', 'detail', 'cover', 'site_plan', 'other'}
+    VALID_PAGE_TYPES = {'elevation', 'schedule', 'floor_plan', 'roof_plan', 'section', 'detail', 'cover', 'site_plan', 'other'}
     
     # Markup colors (RGB)
     MARKUP_COLORS = {
