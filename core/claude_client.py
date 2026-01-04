@@ -479,53 +479,64 @@ IMPORTANT NOTES:
         import time
         start_time = time.time()
         
-        prompt = '''Analyze this roof plan drawing and extract all roof data.
+        prompt = '''Analyze this ROOF PLAN drawing and extract all roof data.
 
-Look for:
-1. ROOF SECTIONS - Each distinct roof area with its square footage
-2. PITCH NOTATIONS - Numbers like "6:12", "8:12", "4/12" indicating roof slope
-3. LINEAR MEASUREMENTS:
-   - Eave lengths (bottom edges of roof)
-   - Ridge lengths (peak/top lines)
-   - Valley lengths (inside corners where roof planes meet)
-   - Hip lengths (outside corners/edges going up)
-   - Rake lengths (sloped edges at gable ends)
-4. TOTAL ROOF AREA if shown
-5. Any material specifications
+CAREFULLY EXAMINE:
+
+1. DATA TABLES - Look for tables showing:
+   - ATTIC AREA (in SF) - this is the roof area for each unit/section
+   - VENTILATION calculations
+   - Unit numbers/names
+   The ATTIC AREA column typically has the largest SF values (500-2000+ SF per unit)
+
+2. PITCH NOTATIONS on the drawing itself:
+   - Look for numbers like "8/12", "6:12", "4/12", "8-12"
+   - May appear as just "8" with a triangle symbol
+   - Often shown near roof slopes or in legends
+   - Check the ROOF PLAN NOTES section
+
+3. LINEAR MEASUREMENTS (if shown):
+   - Dimension strings along edges
+   - Eave, ridge, valley, hip, rake lengths
+
+4. ROOF PLAN LEGEND/NOTES:
+   - Material specifications
+   - Slope requirements
+   - Code references
 
 Return a JSON object with this EXACT structure:
 {
   "roof_sections": [
     {
-      "section_name": "Main Roof",
-      "area_sf": 1850,
-      "pitch": "6:12",
-      "notes": "any relevant notes"
+      "section_name": "Unit 1779",
+      "area_sf": 1192,
+      "pitch": "8:12",
+      "notes": "from attic area table"
     }
   ],
   "pitches_found": [
-    {"notation": "6:12", "location": "main roof"},
-    {"notation": "4:12", "location": "porch"}
+    {"notation": "8:12", "location": "main roof - from notes or drawing"}
   ],
   "linear_elements": {
-    "eave_lf": 180,
-    "ridge_lf": 65,
-    "valley_lf": 24,
-    "hip_lf": 0,
-    "rake_lf": 48
+    "eave_lf": null,
+    "ridge_lf": null,
+    "valley_lf": null,
+    "hip_lf": null,
+    "rake_lf": null
   },
-  "total_roof_area_sf": 2300,
-  "dominant_pitch": "6:12",
+  "total_roof_area_sf": 4434,
+  "dominant_pitch": "8:12",
   "extraction_confidence": 0.85,
-  "notes": "Description of what was found on the plan"
+  "notes": "Description of what was found"
 }
 
-IMPORTANT:
-- If a value is not visible or cannot be determined, use null
-- Convert all measurements to the units specified (SF for area, LF for linear)
-- Parse dimension strings like "45'-6"" to decimal feet (45.5)
-- If only one pitch is shown, that is the dominant pitch
-- Sum all section areas for total if not explicitly shown
+CRITICAL INSTRUCTIONS:
+- For AREA: Use the ATTIC AREA column (largest SF values), NOT ventilation or other columns
+- For PITCH: Search the entire drawing including notes, legends, and slope indicators
+- Pitch may appear as "8/12" or "8:12" or "8-12" - normalize to "8:12" format
+- If multiple units share the same roof, list each unit separately
+- Sum all section areas for total_roof_area_sf
+- Set confidence based on data clarity (0.0-1.0)
 
 Return ONLY the JSON object, no additional text.'''
 
