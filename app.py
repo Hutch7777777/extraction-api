@@ -1236,6 +1236,159 @@ def generate_facade_markup():
 
 
 # ============================================================
+# SIDING POLYGON ENDPOINTS
+# ============================================================
+
+@app.route('/siding-polygons', methods=['POST'])
+def get_siding_polygons():
+    """
+    Return polygon coordinates for net siding area (building - roof - openings).
+    Used by frontend to render siding overlay in DetectionCanvas.
+    """
+    data = request.json
+    page_id = data.get('page_id')
+    job_id = data.get('job_id')
+
+    if not page_id and not job_id:
+        return jsonify({"error": "page_id or job_id required"}), 400
+
+    # If job_id provided, get all pages
+    if job_id and not page_id:
+        pages = supabase_request('GET', 'extraction_pages', filters={
+            'job_id': f'eq.{job_id}',
+            'page_type': 'eq.elevation'
+        })
+        results = []
+        for page in (pages or []):
+            result = _calculate_siding_polygon(page['id'])
+            if result:
+                results.append(result)
+        return jsonify({"success": True, "job_id": job_id, "pages": results})
+
+    # Single page
+    result = _calculate_siding_polygon(page_id)
+    if not result:
+        return jsonify({"error": "No detections found"}), 404
+
+    return jsonify(result)
+
+
+def _calculate_siding_polygon(page_id):
+    """
+    Calculate siding polygon for a single page.
+    Returns exterior bounds and hole cutouts.
+    """
+    # Get all detections for this page
+    detections = supabase_request('GET', 'extraction_detection_details', filters={
+        'page_id': f'eq.{page_id}',
+        'status': 'neq.deleted'
+    })
+
+    if not detections:
+        return None
+
+    building = None
+    roof = None
+    openings = []
+
+    building_sf = 0
+    roof_sf = 0
+    openings_sf = 0
+
+    for det in detections:
+        cls = (det.get('class') or '').lower()
+        cx = det.get('pixel_x', 0)
+        cy = det.get('pixel_y', 0)
+        w = det.get('pixel_width', 0)
+        h = det.get('pixel_height', 0)
+        area = det.get('area_sf') or 0
+
+        # Convert center coords to corner coords
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+
+        if cls == 'building':
+            building = {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'area_sf': area}
+            building_sf = area
+        elif cls == 'roof':
+            roof = {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'area_sf': area}
+            roof_sf = area
+        elif cls in ['window', 'door', 'garage']:
+            openings.append({
+                'class': cls,
+                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                'area_sf': area
+            })
+            openings_sf += area
+
+    if not building:
+        return None
+
+    # Calculate exterior polygon (building minus roof from top)
+    exterior = _calculate_exterior_bounds(building, roof)
+
+    # Convert openings to hole polygons (simple rectangles)
+    holes = []
+    for op in openings:
+        holes.append({
+            'class': op['class'],
+            'points': [
+                [op['x1'], op['y1']],  # top-left
+                [op['x2'], op['y1']],  # top-right
+                [op['x2'], op['y2']],  # bottom-right
+                [op['x1'], op['y2']]   # bottom-left
+            ],
+            'area_sf': op['area_sf']
+        })
+
+    gross_facade_sf = building_sf - roof_sf
+    net_siding_sf = gross_facade_sf - openings_sf
+
+    return {
+        "success": True,
+        "page_id": page_id,
+        "exterior": {
+            "points": exterior,
+            "gross_facade_sf": round(gross_facade_sf, 2)
+        },
+        "holes": holes,
+        "summary": {
+            "building_sf": round(building_sf, 2),
+            "roof_sf": round(roof_sf, 2),
+            "gross_facade_sf": round(gross_facade_sf, 2),
+            "openings_sf": round(openings_sf, 2),
+            "net_siding_sf": round(net_siding_sf, 2),
+            "opening_count": len(openings)
+        }
+    }
+
+
+def _calculate_exterior_bounds(building, roof):
+    """
+    Calculate exterior polygon points.
+    If roof overlaps building, clip building at roof's bottom edge.
+    """
+    x1, y1, x2, y2 = building['x1'], building['y1'], building['x2'], building['y2']
+
+    if roof:
+        # If roof's bottom edge is below building's top edge,
+        # start the facade from roof's bottom
+        roof_bottom = roof['y2']
+        if roof_bottom > y1 and roof_bottom < y2:
+            y1 = roof_bottom
+
+    # Return rectangle as polygon points (clockwise)
+    return [
+        [x1, y1],  # top-left
+        [x2, y1],  # top-right
+        [x2, y2],  # bottom-right
+        [x1, y2]   # bottom-left
+    ]
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
