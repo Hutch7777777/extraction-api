@@ -1275,8 +1275,8 @@ def get_siding_polygons():
 
 def _calculate_siding_polygon(page_id):
     """
-    Calculate siding polygon for a single page.
-    Returns exterior bounds and hole cutouts.
+    Calculate siding polygons for a single page.
+    Handles multiple buildings per page - returns one polygon per building.
     """
     # Get all detections for this page
     detections = supabase_request('GET', 'extraction_detection_details', filters={
@@ -1287,13 +1287,10 @@ def _calculate_siding_polygon(page_id):
     if not detections:
         return None
 
-    building = None
-    roof = None
+    # Collect all buildings, roofs, and openings
+    buildings = []
+    roofs = []
     openings = []
-
-    building_sf = 0
-    roof_sf = 0
-    openings_sf = 0
 
     for det in detections:
         cls = (det.get('class') or '').lower()
@@ -1302,6 +1299,7 @@ def _calculate_siding_polygon(page_id):
         w = det.get('pixel_width', 0)
         h = det.get('pixel_height', 0)
         area = det.get('area_sf') or 0
+        det_id = det.get('id', '')
 
         # Convert center coords to corner coords
         x1 = cx - w / 2
@@ -1309,60 +1307,108 @@ def _calculate_siding_polygon(page_id):
         x2 = cx + w / 2
         y2 = cy + h / 2
 
-        if cls == 'building':
-            building = {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'area_sf': area}
-            building_sf = area
-        elif cls == 'roof':
-            roof = {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'area_sf': area}
-            roof_sf = area
-        elif cls in ['window', 'door', 'garage']:
-            openings.append({
-                'class': cls,
-                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                'area_sf': area
-            })
-            openings_sf += area
+        bbox = {'id': det_id, 'cx': cx, 'cy': cy, 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'area_sf': area}
 
-    if not building:
+        if cls == 'building':
+            buildings.append(bbox)
+        elif cls == 'roof':
+            roofs.append(bbox)
+        elif cls in ['window', 'door', 'garage']:
+            openings.append({'class': cls, **bbox})
+
+    if not buildings:
         return None
 
-    # Calculate exterior polygon (building minus roof from top)
-    exterior = _calculate_exterior_bounds(building, roof)
+    # Calculate siding polygon for each building
+    siding_polygons = []
+    total_net_siding_sf = 0
 
-    # Convert openings to hole polygons (simple rectangles)
-    holes = []
-    for op in openings:
-        holes.append({
-            'class': op['class'],
-            'points': [
-                [op['x1'], op['y1']],  # top-left
-                [op['x2'], op['y1']],  # top-right
-                [op['x2'], op['y2']],  # bottom-right
-                [op['x1'], op['y2']]   # bottom-left
-            ],
-            'area_sf': op['area_sf']
+    for building in buildings:
+        # Find roof that overlaps this building
+        matching_roof = None
+        for roof in roofs:
+            if _detection_overlaps_building(roof, building):
+                matching_roof = roof
+                break
+
+        # Find openings inside this building
+        building_openings = [op for op in openings if _detection_overlaps_building(op, building)]
+
+        # Calculate areas
+        building_sf = building['area_sf']
+        roof_sf = matching_roof['area_sf'] if matching_roof else 0
+        openings_sf = sum(op['area_sf'] for op in building_openings)
+
+        # Calculate exterior polygon (building minus roof from top)
+        exterior = _calculate_exterior_bounds(building, matching_roof)
+
+        # Convert openings to hole polygons (simple rectangles)
+        holes = []
+        for op in building_openings:
+            holes.append({
+                'class': op['class'],
+                'points': [
+                    [op['x1'], op['y1']],  # top-left
+                    [op['x2'], op['y1']],  # top-right
+                    [op['x2'], op['y2']],  # bottom-right
+                    [op['x1'], op['y2']]   # bottom-left
+                ],
+                'area_sf': op['area_sf']
+            })
+
+        gross_facade_sf = building_sf - roof_sf
+        net_siding_sf = gross_facade_sf - openings_sf
+        total_net_siding_sf += net_siding_sf
+
+        siding_polygons.append({
+            "building_id": building['id'],
+            "exterior": {
+                "points": exterior,
+                "gross_facade_sf": round(gross_facade_sf, 2)
+            },
+            "holes": holes,
+            "summary": {
+                "building_sf": round(building_sf, 2),
+                "roof_sf": round(roof_sf, 2),
+                "gross_facade_sf": round(gross_facade_sf, 2),
+                "openings_sf": round(openings_sf, 2),
+                "net_siding_sf": round(net_siding_sf, 2),
+                "opening_count": len(building_openings)
+            }
         })
 
-    gross_facade_sf = building_sf - roof_sf
-    net_siding_sf = gross_facade_sf - openings_sf
+    # For backwards compatibility, also include legacy format for single building
+    # (first building's data at top level)
+    first_polygon = siding_polygons[0] if siding_polygons else None
 
     return {
         "success": True,
         "page_id": page_id,
-        "exterior": {
-            "points": exterior,
-            "gross_facade_sf": round(gross_facade_sf, 2)
+        # Legacy format (for backwards compatibility with existing frontend)
+        "exterior": first_polygon["exterior"] if first_polygon else {"points": [], "gross_facade_sf": 0},
+        "holes": first_polygon["holes"] if first_polygon else [],
+        "summary": first_polygon["summary"] if first_polygon else {
+            "building_sf": 0, "roof_sf": 0, "gross_facade_sf": 0,
+            "openings_sf": 0, "net_siding_sf": 0, "opening_count": 0
         },
-        "holes": holes,
-        "summary": {
-            "building_sf": round(building_sf, 2),
-            "roof_sf": round(roof_sf, 2),
-            "gross_facade_sf": round(gross_facade_sf, 2),
-            "openings_sf": round(openings_sf, 2),
-            "net_siding_sf": round(net_siding_sf, 2),
-            "opening_count": len(openings)
+        # New multi-building format
+        "siding_polygons": siding_polygons,
+        "page_summary": {
+            "total_buildings": len(buildings),
+            "total_net_siding_sf": round(total_net_siding_sf, 2)
         }
     }
+
+
+def _detection_overlaps_building(detection, building):
+    """
+    Check if detection center is within building bounds.
+    Used to associate roofs/openings with their parent building.
+    """
+    det_cx = detection['cx']
+    det_cy = detection['cy']
+    return (building['x1'] <= det_cx <= building['x2'] and
+            building['y1'] <= det_cy <= building['y2'])
 
 
 def _calculate_exterior_bounds(building, roof):
