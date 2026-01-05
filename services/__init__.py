@@ -34,6 +34,13 @@ from services.roof_service import (
     calculate_soffit_area,
     calculate_roofing_squares
 )
+from services.linear_service import (
+    calculate_linear_elements_for_job,
+    get_linear_summary,
+    set_corner_counts,
+    set_wall_height,
+    get_wall_heights_from_ocr
+)
 
 __all__ = [
     # PDF
@@ -74,5 +81,12 @@ __all__ = [
     'calculate_pitch_factor',
     'calculate_true_area',
     'calculate_soffit_area',
-    'calculate_roofing_squares'
+    'calculate_roofing_squares',
+    
+    # Linear Elements (Phase 4)
+    'calculate_linear_elements_for_job',
+    'get_linear_summary',
+    'set_corner_counts',
+    'set_wall_height',
+    'get_wall_heights_from_ocr'
 ]

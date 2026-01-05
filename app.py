@@ -41,9 +41,9 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.3",
+        "version": "4.4",
         "architecture": "modular",
-        "features": ["markups", "scale_extraction", "cross_reference", "floor_plan_analysis", "elevation_ocr", "dimension_sources", "roof_intelligence"]
+        "features": ["markups", "scale_extraction", "cross_reference", "floor_plan_analysis", "elevation_ocr", "dimension_sources", "roof_intelligence", "linear_elements"]
     })
 
 
@@ -792,6 +792,143 @@ def calculate_roofing():
             "ridge_cap_lf": calculate_ridge_cap_lf(ridge_lf, hip_lf)
         }
     })
+
+
+# ============================================================
+# LINEAR ELEMENTS ENDPOINTS (Phase 4)
+# ============================================================
+
+@app.route('/calculate-linear', methods=['POST'])
+def calculate_linear():
+    """
+    Calculate all linear elements for a job.
+    
+    Uses OCR wall heights + corner counts to calculate:
+    - Corner LF (outside and inside)
+    - Perimeter elements (starter strip, water table, etc.)
+    
+    Request body:
+        - job_id: UUID of job
+    
+    Returns:
+        Complete linear element calculations
+    """
+    from services.linear_service import calculate_linear_elements_for_job
+    
+    data = request.json
+    job_id = data.get('job_id')
+    
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    
+    return jsonify(calculate_linear_elements_for_job(job_id))
+
+
+@app.route('/linear-summary', methods=['GET'])
+def get_linear_summary_endpoint():
+    """
+    Get linear element summary for a job.
+    
+    Query params:
+        - job_id: UUID of job
+    
+    Returns:
+        All stored linear elements and trim totals
+    """
+    from services.linear_service import get_linear_summary
+    
+    job_id = request.args.get('job_id')
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    
+    return jsonify(get_linear_summary(job_id))
+
+
+@app.route('/wall-heights', methods=['GET'])
+def get_wall_heights():
+    """
+    Get wall heights from OCR data for a job.
+    
+    Query params:
+        - job_id: UUID of job
+    
+    Returns:
+        Floor-by-floor wall heights from elevation OCR
+    """
+    from services.linear_service import get_wall_heights_from_ocr
+    
+    job_id = request.args.get('job_id')
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    
+    return jsonify(get_wall_heights_from_ocr(job_id))
+
+
+@app.route('/set-corners', methods=['POST'])
+def set_corners():
+    """
+    Manually set corner counts and recalculate LF.
+    
+    Use when floor plan analysis is inaccurate.
+    
+    Request body:
+        - job_id: UUID of job
+        - outside_corners: Count of outside corners
+        - inside_corners: Count of inside corners
+        - wall_height_ft: Optional override wall height
+    
+    Returns:
+        Updated corner calculations
+    """
+    from services.linear_service import set_corner_counts
+    
+    data = request.json
+    job_id = data.get('job_id')
+    outside = data.get('outside_corners')
+    inside = data.get('inside_corners')
+    wall_height = data.get('wall_height_ft')
+    
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    if outside is None or inside is None:
+        return jsonify({"error": "outside_corners and inside_corners required"}), 400
+    
+    return jsonify(set_corner_counts(job_id, outside, inside, wall_height))
+
+
+@app.route('/calculate-corners', methods=['POST'])
+def calculate_corners():
+    """
+    Calculate corner LF from counts and wall height.
+    
+    Standalone calculator - doesn't require job data.
+    
+    Request body:
+        - outside_corners: Count
+        - inside_corners: Count
+        - wall_height_ft: Total wall height (all stories)
+        OR
+        - first_floor_ft: First floor height
+        - second_floor_ft: Optional second floor height
+    
+    Returns:
+        Corner LF calculations and material quantities
+    """
+    from services.linear_service import calculate_corner_lf
+    
+    data = request.json
+    outside = data.get('outside_corners', 0)
+    inside = data.get('inside_corners', 0)
+    
+    # Get wall height
+    if data.get('wall_height_ft'):
+        wall_height = data['wall_height_ft']
+    else:
+        first = data.get('first_floor_ft', 9.0)
+        second = data.get('second_floor_ft', 0)
+        wall_height = first + second
+    
+    return jsonify(calculate_corner_lf(outside, inside, wall_height))
 
 
 # ============================================================
