@@ -25,7 +25,7 @@ def convert_pdf_background(job_id, pdf_url):
         from pdf2image import convert_from_path, pdfinfo_from_path
         
         print(f"[{job_id}] Downloading PDF...", flush=True)
-        update_job(job_id, {'status': 'converting'})
+        update_job(job_id, {'status': 'classifying'})
         
         # Download PDF to temp file
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
@@ -111,7 +111,7 @@ def convert_pdf_background(job_id, pdf_url):
         except:
             pass
         
-        update_job(job_id, {'status': 'converted'})
+        update_job(job_id, {'status': 'classifying'})
         print(f"[{job_id}] Conversion complete: {pages_converted} pages", flush=True)
     
     except Exception as e:
