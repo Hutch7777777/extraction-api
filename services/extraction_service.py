@@ -83,7 +83,7 @@ def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
             }
         }
         
-        # print(f"[DEBUG] Inserting detection {idx+1}: {detection_class}", flush=True)
+        # # print(f"[DEBUG] Inserting detection {idx+1}: {detection_class}", flush=True)
         result = supabase_request('POST', 'extraction_detection_details', detection_record)
         if result:
             inserted += 1
