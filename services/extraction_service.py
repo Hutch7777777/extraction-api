@@ -151,6 +151,16 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
             if 'error' not in detection:
                 predictions = detection.get('predictions', [])
                 
+
+                # Extract and save image dimensions from Roboflow response
+                if predictions and predictions[0].get('rle_mask', {}).get('size'):
+                    mask_size = predictions[0]['rle_mask']['size']
+                    img_height, img_width = mask_size[0], mask_size[1]
+                    supabase_request('PATCH', f'extraction_pages?id=eq.{page_id}', {
+                        'original_width': img_width,
+                        'original_height': img_height
+                    })
+                    print(f"[{job_id}] Saved dimensions: {img_width}x{img_height}", flush=True)
                 # INSERT DETECTIONS INTO DATABASE
                 inserted_count = _insert_detections(job_id, page_id, predictions, scale_ratio, dpi)
                 totals['total_detections'] += inserted_count
