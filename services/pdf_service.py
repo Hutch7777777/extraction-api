@@ -117,3 +117,6 @@ def convert_pdf_background(job_id, pdf_url):
     except Exception as e:
         print(f"[{job_id}] Conversion failed: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
+
+        from services.classification_service import classify_job_background
+        classify_job_background(job_id)
