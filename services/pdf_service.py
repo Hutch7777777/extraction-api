@@ -20,12 +20,13 @@ def convert_pdf_background(job_id, pdf_url):
     2. Convert each page to PNG
     3. Upload to storage
     4. Create extraction_pages records
+    5. Auto-trigger classification
     """
     try:
         from pdf2image import convert_from_path, pdfinfo_from_path
         
         print(f"[{job_id}] Downloading PDF...", flush=True)
-        update_job(job_id, {'status': 'classifying'})
+        update_job(job_id, {'status': 'converting'})
         
         # Download PDF to temp file
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
@@ -113,10 +114,11 @@ def convert_pdf_background(job_id, pdf_url):
         
         update_job(job_id, {'status': 'classifying'})
         print(f"[{job_id}] Conversion complete: {pages_converted} pages", flush=True)
+        
+        # Auto-trigger classification
+        from services.classification_service import classify_job_background
+        classify_job_background(job_id)
     
     except Exception as e:
         print(f"[{job_id}] Conversion failed: {e}", flush=True)
         update_job(job_id, {'status': 'failed', 'error_message': str(e)})
-
-        from services.classification_service import classify_job_background
-        classify_job_background(job_id)
