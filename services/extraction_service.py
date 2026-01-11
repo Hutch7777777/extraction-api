@@ -35,11 +35,11 @@ def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
     for idx, pred in enumerate(predictions):
         detection_class = (pred.get('class') or '').lower().strip() or 'unknown'
         
-        # Roboflow returns center x,y - convert to top-left corner
+        # Roboflow returns center x,y - store as center (frontend converts)
+        pixel_x = pred.get('x', 0)
+        pixel_y = pred.get('y', 0)
         pixel_width = pred.get('width', 0)
         pixel_height = pred.get('height', 0)
-        pixel_x = pred.get('x', 0) - (pixel_width / 2)
-        pixel_y = pred.get('y', 0) - (pixel_height / 2)
         confidence = pred.get('confidence', 1.0)
         
         # Calculate real dimensions
