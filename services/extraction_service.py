@@ -74,7 +74,7 @@ def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
             'area_sf': round(area_sf, 2),
             'perimeter_lf': round(perimeter_lf, 2),
             'is_triangle': is_triangle,
-            'status': 'pending',
+            'status': 'auto',
             'original_bbox': {
                 'x': pixel_x,
                 'y': pixel_y,
