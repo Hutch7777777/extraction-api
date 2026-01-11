@@ -28,7 +28,7 @@ class Config:
     MAX_CONCURRENT_CLAUDE = 3
     BATCH_DELAY_SECONDS = 0.5
     PDF_CHUNK_SIZE = 5
-    DEFAULT_DPI = 100
+    DEFAULT_DPI = 200
     
     # CORS
     CORS_ORIGINS = ['http://localhost:3000', 'https://*.vercel.app']
