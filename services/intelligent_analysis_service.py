@@ -830,7 +830,7 @@ def store_corner_detections(
             'pixel_height': CORNER_SIZE,
             'confidence': confidence,
             'source': 'intelligent_analysis',
-            'status': 'pending',
+            'status': 'auto',
             'notes': description
         })
 
@@ -852,7 +852,7 @@ def store_corner_detections(
             'pixel_height': CORNER_SIZE,
             'confidence': confidence,
             'source': 'intelligent_analysis',
-            'status': 'pending',
+            'status': 'auto',
             'notes': description
         })
 
