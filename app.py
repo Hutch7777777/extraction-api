@@ -41,7 +41,7 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.5",
+        "version": "4.6",
         "architecture": "modular",
         "features": [
             "markups",

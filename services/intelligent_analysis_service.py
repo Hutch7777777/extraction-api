@@ -547,8 +547,9 @@ def analyze_job_background(job_id: str) -> None:
                             element_totals[key] += count
 
         # Update job with results
+        # Note: Use 'classified' status for DB constraint compatibility
         update_job(job_id, {
-            'status': 'analyzed',
+            'status': 'classified',
             'pages_classified': len(successful),
             'elevation_count': page_type_counts.get('elevation', 0),
             'schedule_count': page_type_counts.get('schedule', 0),

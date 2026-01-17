@@ -114,10 +114,20 @@ def convert_pdf_background(job_id, pdf_url):
         
         update_job(job_id, {'status': 'classifying'})
         print(f"[{job_id}] Conversion complete: {pages_converted} pages", flush=True)
-        
-        # Auto-trigger classification
-        from services.classification_service import classify_job_background
-        classify_job_background(job_id)
+
+        # Auto-trigger intelligent analysis (parallel, 50+ fields extracted)
+        # Replaces legacy sequential classification
+        from services.intelligent_analysis_service import analyze_job_background
+        analyze_job_background(job_id)
+
+        # After analysis completes, run aggregation to calculate corner LF
+        from services.aggregation_service import aggregate_job
+        try:
+            aggregate_job(job_id)
+            print(f"[{job_id}] ✅ Aggregation complete", flush=True)
+        except Exception as e:
+            print(f"[{job_id}] ⚠️ Aggregation failed (non-fatal): {e}", flush=True)
+            # Don't fail the job - aggregation is optional enhancement
     
     except Exception as e:
         print(f"[{job_id}] Conversion failed: {e}", flush=True)
