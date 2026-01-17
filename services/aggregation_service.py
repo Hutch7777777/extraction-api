@@ -491,22 +491,74 @@ def aggregate_job(job_id: str) -> Dict:
             warnings.append(f"Outside corner counts vary between floor plans: {counts}")
 
     # ========== HEIGHTS ==========
-    story_heights = list(elevation_data["story_heights"].values())
-    if story_heights:
-        result.heights["story_heights"] = story_heights
-        total_height = sum(h["height_ft"] for h in story_heights)
-        result.heights["total_wall_height_ft"] = round(total_height, 2)
-    else:
-        missing.append("wall_heights")
-        result.heights["total_wall_height_ft"] = 0
-
-    # Stories count
+    # First, try to get stories count (needed for fallback)
+    stories_count = None
     if elevation_data["stories"]:
         # Use most common story count
         story_counts = [s["count"] for s in elevation_data["stories"]]
-        result.heights["stories"] = max(set(story_counts), key=story_counts.count)
+        stories_count = max(set(story_counts), key=story_counts.count)
+        result.heights["stories"] = stories_count
     else:
         result.heights["stories"] = None
+
+    # Try to extract wall heights from elevation data
+    story_heights = list(elevation_data["story_heights"].values())
+    height_source = None
+    height_confidence = 0.0
+
+    if story_heights:
+        # Primary: Use extracted story heights
+        result.heights["story_heights"] = story_heights
+        total_height = sum(h["height_ft"] for h in story_heights)
+        result.heights["total_wall_height_ft"] = round(total_height, 2)
+        height_source = "extracted"
+        height_confidence = 0.9
+    else:
+        # Fallback 1: Check raw_dimensions for wall height patterns
+        wall_height_from_raw = None
+        for page in elevations:
+            extracted = page.get('extracted_data') or {}
+            dimensions = extracted.get('dimensions', {})
+            raw_dims = dimensions.get('raw_dimensions', [])
+
+            for dim in raw_dims:
+                context = (dim.get('context') or '').lower()
+                # Look for height-related dimensions
+                if any(kw in context for kw in ['floor height', 'wall height', 'plate height', 'ceiling']):
+                    value_inches = dim.get('value_inches')
+                    if value_inches and value_inches > 60:  # At least 5 feet
+                        height_ft = value_inches / 12.0
+                        if wall_height_from_raw is None or height_ft > wall_height_from_raw:
+                            wall_height_from_raw = height_ft
+
+        if wall_height_from_raw:
+            # Use raw dimension height (likely single story height)
+            if stories_count and stories_count > 1:
+                # Multiply by stories if multi-story
+                result.heights["total_wall_height_ft"] = round(wall_height_from_raw * stories_count, 2)
+            else:
+                result.heights["total_wall_height_ft"] = round(wall_height_from_raw, 2)
+            height_source = "raw_dimensions"
+            height_confidence = 0.7
+        elif stories_count:
+            # Fallback 2: Use 9 feet per story default
+            result.heights["total_wall_height_ft"] = round(stories_count * 9.0, 2)
+            height_source = "fallback_9ft_per_story"
+            height_confidence = 0.5
+            warnings.append(f"Wall heights estimated at 9' per story ({stories_count} stories = {stories_count * 9.0}') - verify accuracy")
+        else:
+            # No height data available
+            result.heights["total_wall_height_ft"] = 0
+            height_source = None
+            height_confidence = 0.0
+            missing.append("wall_heights")
+
+    # Set height source and confidence
+    result.heights["height_source"] = height_source
+    result.heights["height_confidence"] = height_confidence
+
+    # Track missing stories separately if not found
+    if stories_count is None:
         missing.append("stories")
 
     # ========== CALCULATED MEASUREMENTS ==========
@@ -520,8 +572,9 @@ def aggregate_job(job_id: str) -> Dict:
         result.calculated["outside_corner_lf"] = round(outside_corner_count * total_height_ft, 2)
     else:
         result.calculated["outside_corner_lf"] = 0
-        if outside_corner_count and not total_height_ft:
-            warnings.append("Cannot calculate outside corner LF - missing wall heights")
+        # Only warn if we have corners but no height at all (not even fallback)
+        if outside_corner_count and not total_height_ft and not height_source:
+            warnings.append("Cannot calculate outside corner LF - missing wall heights and story count")
 
     if inside_corner_count and total_height_ft:
         result.calculated["inside_corner_lf"] = round(inside_corner_count * total_height_ft, 2)
