@@ -41,9 +41,19 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.4",
+        "version": "4.5",
         "architecture": "modular",
-        "features": ["markups", "scale_extraction", "cross_reference", "floor_plan_analysis", "elevation_ocr", "dimension_sources", "roof_intelligence", "linear_elements"]
+        "features": [
+            "markups",
+            "scale_extraction",
+            "cross_reference",
+            "floor_plan_analysis",
+            "elevation_ocr",
+            "dimension_sources",
+            "roof_intelligence",
+            "linear_elements",
+            "intelligent_analysis"  # NEW: Parallel page analysis with comprehensive extraction
+        ]
     })
 
 
@@ -104,33 +114,312 @@ def start_job():
 
 @app.route('/classify-job', methods=['POST'])
 def classify_job():
-    """Classify all pages in a job"""
+    """Classify all pages in a job (LEGACY - use /analyze-job instead)"""
     from services.classification_service import classify_job_background
-    
+
     data = request.json
     if not data.get('job_id'):
         return jsonify({"error": "job_id required"}), 400
-    
+
     threading.Thread(target=classify_job_background, args=(data['job_id'],)).start()
-    
+
     return jsonify({"success": True, "job_id": data['job_id'], "status": "classifying"})
+
+
+# ============================================================
+# INTELLIGENT ANALYSIS ENDPOINTS (v4.5)
+# ============================================================
+
+@app.route('/analyze-job', methods=['POST'])
+def analyze_job_endpoint():
+    """
+    Run intelligent analysis on all pages in a job.
+
+    This is the next-generation replacement for /classify-job.
+    Uses parallel processing (10 concurrent) and extracts comprehensive data
+    in a single API call per page.
+
+    Request body:
+        - job_id: UUID of job to analyze
+        - sync: bool (default: false) - if true, wait for completion and return results
+
+    Returns:
+        Async mode: {"success": true, "job_id": "...", "status": "analyzing"}
+        Sync mode: Full analysis results with all extracted data
+    """
+    from services.intelligent_analysis_service import analyze_job_background, analyze_job
+
+    data = request.json
+    if not data.get('job_id'):
+        return jsonify({"error": "job_id required"}), 400
+
+    job_id = data['job_id']
+    sync_mode = data.get('sync', False)
+
+    # Verify job exists
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    if sync_mode:
+        # Run synchronously and return full results
+        result = analyze_job(job_id)
+        return jsonify(result)
+    else:
+        # Run in background thread
+        threading.Thread(target=analyze_job_background, args=(job_id,)).start()
+        return jsonify({
+            "success": True,
+            "job_id": job_id,
+            "status": "analyzing",
+            "message": "Intelligent analysis started. Poll /job-status for progress."
+        })
+
+
+@app.route('/page-analysis/<job_id>', methods=['GET'])
+def get_page_analysis(job_id):
+    """
+    Get extracted analysis data for all pages in a job.
+
+    Returns pages with their extracted_data JSONB parsed, including:
+    - classification (page_type, confidence, elevation_name)
+    - scale (notation, ratio)
+    - element_counts (windows, doors, garages, corners)
+    - dimensions (wall heights, plate heights)
+    - materials (siding, trim, fascia)
+    - spatial_context (stories, roof style)
+    - quality_indicators
+
+    Query params:
+        - page_type: Filter by page type (elevation, floor_plan, etc.)
+        - include_raw: Include raw extraction data (default: true)
+
+    Returns:
+        List of pages with extracted data
+    """
+    # Get job to verify it exists
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    # Get all pages
+    page_type_filter = request.args.get('page_type')
+    include_raw = request.args.get('include_raw', 'true').lower() == 'true'
+
+    if page_type_filter:
+        pages = get_pages_by_job(job_id, page_type=page_type_filter)
+    else:
+        pages = get_pages_by_job(job_id)
+
+    # Process pages to extract summary data
+    results = []
+    for page in pages:
+        page_data = {
+            "page_id": page.get('id'),
+            "page_number": page.get('page_number'),
+            "page_type": page.get('page_type'),
+            "page_type_confidence": page.get('page_type_confidence'),
+            "elevation_name": page.get('elevation_name'),
+            "scale_notation": page.get('scale_notation'),
+            "scale_ratio": page.get('scale_ratio'),
+            "status": page.get('status'),
+            "image_url": page.get('image_url'),
+            "thumbnail_url": page.get('thumbnail_url')
+        }
+
+        # Include extracted_data if available and requested
+        extracted = page.get('extracted_data')
+        if extracted and include_raw:
+            page_data['extracted_data'] = extracted
+
+        # Always include a summary if extracted_data exists
+        if extracted:
+            from services.intelligent_analysis_service import get_extraction_summary
+            page_data['summary'] = get_extraction_summary(extracted)
+
+        results.append(page_data)
+
+    return jsonify({
+        "job_id": job_id,
+        "job_status": job.get('status'),
+        "total_pages": len(results),
+        "pages": results
+    })
+
+
+@app.route('/analyze-page', methods=['POST'])
+def analyze_single_page_endpoint():
+    """
+    Analyze a single page with intelligent extraction.
+
+    Useful for:
+    - Testing extraction on specific pages
+    - Re-running analysis after corrections
+    - Debugging extraction issues
+
+    Request body:
+        - page_id: UUID of page to analyze
+
+    Returns:
+        Full extraction result including all extracted data
+    """
+    from services.intelligent_analysis_service import analyze_single_page_sync
+
+    data = request.json
+    if not data.get('page_id'):
+        return jsonify({"error": "page_id required"}), 400
+
+    page_id = data['page_id']
+
+    # Verify page exists
+    page = get_page(page_id)
+    if not page:
+        return jsonify({"error": "Page not found"}), 404
+
+    # Run analysis
+    result = analyze_single_page_sync(page_id)
+
+    return jsonify({
+        "page_id": page_id,
+        "page_number": page.get('page_number'),
+        **result
+    })
+
+
+@app.route('/analysis-estimate/<job_id>', methods=['GET'])
+def get_analysis_estimate(job_id):
+    """
+    Get cost and time estimate for analyzing a job.
+
+    Call this before /analyze-job to preview:
+    - Estimated API token usage
+    - Estimated cost in USD
+    - Estimated processing time
+
+    Returns:
+        Estimate data including tokens, cost, and time
+    """
+    from services.intelligent_analysis_service import estimate_job_cost
+
+    # Get job
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    page_count = job.get('total_pages') or 0
+
+    if page_count == 0:
+        # Count pages directly
+        pages = get_pages_by_job(job_id)
+        page_count = len(pages)
+
+    estimate = estimate_job_cost(page_count)
+
+    return jsonify({
+        "job_id": job_id,
+        "job_status": job.get('status'),
+        **estimate
+    })
 
 
 @app.route('/process-job', methods=['POST'])
 def process_job():
     """Process all pages in a job (detection + measurements)"""
     from services.extraction_service import process_job_background
-    
+
     data = request.json
     if not data.get('job_id'):
         return jsonify({"error": "job_id required"}), 400
-    
+
     threading.Thread(
         target=process_job_background,
         args=(data['job_id'], data.get('scale_ratio'), data.get('generate_markups', True))
     ).start()
-    
+
     return jsonify({"success": True, "job_id": data['job_id'], "status": "processing"})
+
+
+# ============================================================
+# AGGREGATION ENDPOINTS (v4.5)
+# ============================================================
+
+@app.route('/aggregate-job/<job_id>', methods=['POST'])
+def aggregate_job_data(job_id):
+    """
+    Aggregate extracted data from all pages into unified measurements.
+
+    Combines floor plan corners with elevation heights to calculate
+    corner linear feet. Merges window/door counts from schedules and
+    elevations. Tracks sources and confidence for all values.
+
+    Returns:
+        Aggregated data with:
+        - corners: outside/inside counts with LF calculations
+        - heights: story heights and total wall height
+        - elements: windows, doors, gables, garages with source preference
+        - materials: siding type and profile
+        - spatial: stories, roof style, foundation type
+        - quality: data completeness and warnings
+    """
+    from services.aggregation_service import aggregate_job
+
+    result = aggregate_job(job_id)
+
+    if not result.get('success'):
+        return jsonify(result), 404 if result.get('error') == 'Job not found' else 400
+
+    return jsonify(result)
+
+
+@app.route('/job-summary/<job_id>', methods=['GET'])
+def get_job_summary(job_id):
+    """
+    Get the aggregated summary for a job.
+
+    Must run POST /aggregate-job/<job_id> first to generate the summary.
+
+    Returns:
+        Previously aggregated data with corners, heights, elements,
+        materials, spatial context, and quality metrics.
+    """
+    from services.aggregation_service import get_aggregated_summary
+
+    result = get_aggregated_summary(job_id)
+
+    if not result:
+        return jsonify({
+            "error": "No aggregated data found. Run POST /aggregate-job/<job_id> first.",
+            "job_id": job_id
+        }), 404
+
+    return jsonify(result)
+
+
+@app.route('/recalculate-corners/<job_id>', methods=['POST'])
+def recalculate_corner_lf(job_id):
+    """
+    Recalculate corner linear feet with a manually specified wall height.
+
+    Useful when the user corrects the wall height after reviewing.
+
+    Request body:
+        - wall_height_ft: Total wall height in feet (e.g., 18.0 for 2-story)
+
+    Returns:
+        Updated corner LF calculations
+    """
+    from services.aggregation_service import recalculate_corner_lf as recalc
+
+    data = request.json
+    if not data.get('wall_height_ft'):
+        return jsonify({"error": "wall_height_ft required"}), 400
+
+    result = recalc(job_id, data['wall_height_ft'])
+
+    if not result.get('success'):
+        return jsonify(result), 404
+
+    return jsonify(result)
 
 
 # ============================================================
