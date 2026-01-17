@@ -822,15 +822,16 @@ def store_corner_detections(
         detections.append({
             'job_id': job_id,
             'page_id': page_id,
-            'class': 'outside_corner',
+            'class': 'corner_outside',
             'detection_index': idx,
-            'pixel_x': x - CORNER_SIZE // 2,  # Center the marker
-            'pixel_y': y - CORNER_SIZE // 2,
+            'pixel_x': x,  # Point center
+            'pixel_y': y,
             'pixel_width': CORNER_SIZE,
             'pixel_height': CORNER_SIZE,
             'confidence': confidence,
             'source': 'intelligent_analysis',
             'status': 'auto',
+            'markup_type': 'point',  # Render as point marker
             'notes': description
         })
 
@@ -844,15 +845,16 @@ def store_corner_detections(
         detections.append({
             'job_id': job_id,
             'page_id': page_id,
-            'class': 'inside_corner',
+            'class': 'corner_inside',
             'detection_index': idx,
-            'pixel_x': x - CORNER_SIZE // 2,
-            'pixel_y': y - CORNER_SIZE // 2,
+            'pixel_x': x,  # Point center
+            'pixel_y': y,
             'pixel_width': CORNER_SIZE,
             'pixel_height': CORNER_SIZE,
             'confidence': confidence,
             'source': 'intelligent_analysis',
             'status': 'auto',
+            'markup_type': 'point',  # Render as point marker
             'notes': description
         })
 
