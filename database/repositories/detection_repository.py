@@ -56,3 +56,22 @@ def get_active_detections_by_page(page_id):
         'status': 'neq.deleted',
         'order': 'class,detection_index'
     }) or []
+
+
+def batch_create_detections(detections_list):
+    """
+    Create multiple detections in a single request.
+
+    Args:
+        detections_list: List of detection dicts, each with:
+            - job_id, page_id, class, detection_index
+            - x, y, width, height (pixel coordinates)
+            - confidence, source, status
+
+    Returns:
+        List of created detection records
+    """
+    if not detections_list:
+        return []
+
+    return supabase_request('POST', 'extraction_detection_details', detections_list) or []

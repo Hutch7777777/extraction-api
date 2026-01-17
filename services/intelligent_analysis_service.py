@@ -27,6 +27,7 @@ from collections import Counter
 
 from config import config
 from database import update_page, update_job, get_pages_by_job
+from database.repositories.detection_repository import batch_create_detections
 from utils.validation import normalize_page_type
 
 
@@ -179,6 +180,16 @@ Return ONLY a valid JSON object with this exact structure:
     "estimator_notes": [],
     "missing_information": [],
     "confidence_overall": 0.0-1.0
+  },
+
+  "corner_positions": {
+    "outside_corners": [
+      {"x": 150, "y": 200, "confidence": 0.9, "description": "NW corner of main structure"}
+    ],
+    "inside_corners": [
+      {"x": 250, "y": 350, "confidence": 0.8, "description": "garage setback corner"}
+    ],
+    "coordinate_reference": "pixel coordinates from top-left origin"
   }
 }
 
@@ -190,6 +201,16 @@ EXTRACTION GUIDELINES:
 5. Confidence: 0.9+ for clear data, 0.7-0.9 for inferred, <0.7 for uncertain
 6. For floor plans: count corners on the EXTERIOR perimeter only
 7. Look for material notes, specifications, and legends on the drawing
+
+CORNER POSITION EXTRACTION (FOR FLOOR PLAN PAGES ONLY):
+When analyzing floor plans, identify corner positions along the EXTERIOR building perimeter:
+- OUTSIDE CORNERS: Where two exterior walls meet forming an outward-facing angle (convex, building sticks out)
+- INSIDE CORNERS: Where two exterior walls meet forming an inward-facing angle (concave, building goes in)
+- Return x,y as pixel coordinates from the top-left corner of the image
+- Mark the approximate CENTER of each corner intersection
+- Include attached garage corners
+- Do NOT include interior room corners - only exterior perimeter
+- If not a floor plan or no corners identifiable, return empty arrays for corner_positions
 
 Return ONLY the JSON object, no markdown formatting or explanation.'''
 
@@ -442,6 +463,12 @@ async def analyze_single_page(
                 'processing_time_ms': result.get('processing_time_ms', 0)
             }
             update_page(page_id, update_data)
+
+            # Store corner positions as detections for floor plan pages
+            if page_type == 'floor_plan':
+                corner_positions = extracted_data.get('corner_positions', {})
+                if corner_positions.get('outside_corners') or corner_positions.get('inside_corners'):
+                    store_corner_detections(job_id, page_id, extracted_data)
 
             return AnalysisResult(
                 page_id=page_id,
@@ -751,6 +778,94 @@ def estimate_job_cost(page_count: int) -> Dict:
         "estimated_time_seconds": estimated_seconds,
         "estimated_time_formatted": f"{int(estimated_seconds // 60)}m {int(estimated_seconds % 60)}s"
     }
+
+
+def store_corner_detections(
+    job_id: str,
+    page_id: str,
+    extracted_data: Dict
+) -> int:
+    """
+    Store extracted corner positions as detection records.
+
+    Converts corner_positions from Claude Vision analysis into
+    extraction_detection_details records that can be displayed
+    in the Detection Editor.
+
+    Args:
+        job_id: The extraction job ID
+        page_id: The page ID where corners were detected
+        extracted_data: The full extracted_data from Claude Vision
+
+    Returns:
+        Number of corner detections created
+    """
+    corner_positions = extracted_data.get('corner_positions', {})
+    outside_corners = corner_positions.get('outside_corners', [])
+    inside_corners = corner_positions.get('inside_corners', [])
+
+    if not outside_corners and not inside_corners:
+        return 0
+
+    detections = []
+
+    # Size for corner point markers (small square)
+    CORNER_SIZE = 20  # pixels
+
+    # Process outside corners
+    for idx, corner in enumerate(outside_corners):
+        x = corner.get('x', 0)
+        y = corner.get('y', 0)
+        confidence = corner.get('confidence', 0.8)
+        description = corner.get('description', '')
+
+        detections.append({
+            'job_id': job_id,
+            'page_id': page_id,
+            'class': 'outside_corner',
+            'detection_index': idx,
+            'x': x - CORNER_SIZE // 2,  # Center the marker
+            'y': y - CORNER_SIZE // 2,
+            'width': CORNER_SIZE,
+            'height': CORNER_SIZE,
+            'confidence': confidence,
+            'source': 'intelligent_analysis',
+            'status': 'pending',
+            'notes': description
+        })
+
+    # Process inside corners
+    for idx, corner in enumerate(inside_corners):
+        x = corner.get('x', 0)
+        y = corner.get('y', 0)
+        confidence = corner.get('confidence', 0.8)
+        description = corner.get('description', '')
+
+        detections.append({
+            'job_id': job_id,
+            'page_id': page_id,
+            'class': 'inside_corner',
+            'detection_index': idx,
+            'x': x - CORNER_SIZE // 2,
+            'y': y - CORNER_SIZE // 2,
+            'width': CORNER_SIZE,
+            'height': CORNER_SIZE,
+            'confidence': confidence,
+            'source': 'intelligent_analysis',
+            'status': 'pending',
+            'notes': description
+        })
+
+    # Batch insert all corner detections
+    if detections:
+        try:
+            batch_create_detections(detections)
+            print(f"  Created {len(detections)} corner detections ({len(outside_corners)} outside, {len(inside_corners)} inside)", flush=True)
+        except Exception as e:
+            print(f"  Warning: Failed to store corner detections: {e}", flush=True)
+            return 0
+
+    return len(detections)
 
 
 def get_extraction_summary(extracted_data: Dict) -> Dict:
