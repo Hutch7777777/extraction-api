@@ -16,8 +16,41 @@ except ImportError:
     fitz = None
     print("WARNING: pymupdf not installed. Install with: pip install pymupdf", flush=True)
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 from config import config
 from database import supabase_request, upload_to_storage
+
+
+def get_image_dimensions(image_url: str) -> tuple:
+    """
+    Fetch an image and return its dimensions (width, height).
+    Returns (None, None) if unable to fetch or parse.
+    """
+    if not image_url:
+        return None, None
+
+    try:
+        response = requests.get(image_url, timeout=30)
+        if response.status_code == 200:
+            if Image:
+                # Use PIL for accurate dimensions
+                img = Image.open(io.BytesIO(response.content))
+                return img.size  # (width, height)
+            elif fitz:
+                # Fallback to fitz
+                img_doc = fitz.open(stream=response.content, filetype='png')
+                if len(img_doc) > 0:
+                    rect = img_doc[0].rect
+                    img_doc.close()
+                    return rect.width, rect.height
+    except Exception as e:
+        print(f"[Bluebeam Export] Failed to get image dimensions: {e}", flush=True)
+
+    return None, None
 
 
 # Extended color mapping for Bluebeam annotations
@@ -147,6 +180,8 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
     for page_idx, page_data in enumerate(pages):
         page_id = page_data.get('id')
         page_number = page_data.get('page_number', page_idx + 1)
+
+        # Try to get image dimensions from multiple sources
         image_width = page_data.get('image_width') or page_data.get('width')
         image_height = page_data.get('image_height') or page_data.get('height')
 
@@ -160,15 +195,34 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
         pdf_page = pdf_doc[pdf_page_idx]
         pdf_rect = pdf_page.rect
 
-        # Calculate scale factors between image coordinates and PDF coordinates
-        if image_width and image_height:
+        # If we created PDF from images, dimensions already match (scale = 1.0)
+        if created_from_images:
+            scale_x = 1.0
+            scale_y = 1.0
+        elif image_width and image_height:
+            # Have image dimensions from database - calculate scale
             scale_x = pdf_rect.width / image_width
             scale_y = pdf_rect.height / image_height
         else:
-            scale_x = 1.0
-            scale_y = 1.0
+            # Try to fetch image dimensions from the stored image
+            image_url = page_data.get('original_image_url') or page_data.get('image_url')
+            fetched_width, fetched_height = get_image_dimensions(image_url)
 
-        print(f"[Bluebeam Export] Processing page {page_number}, scale: {scale_x:.3f}x{scale_y:.3f}", flush=True)
+            if fetched_width and fetched_height:
+                image_width = fetched_width
+                image_height = fetched_height
+                scale_x = pdf_rect.width / image_width
+                scale_y = pdf_rect.height / image_height
+                print(f"[Bluebeam Export] Fetched image dimensions: {image_width}x{image_height}", flush=True)
+            else:
+                # Last resort: assume common rendering dimensions (2048px wide, aspect ratio from PDF)
+                # This is a fallback - the aspect ratio should match the PDF
+                print(f"[Bluebeam Export] WARNING: Could not get image dimensions, using PDF dimensions", flush=True)
+                # Use PDF dimensions directly (scale = 1.0) - annotations may not align perfectly
+                scale_x = 1.0
+                scale_y = 1.0
+
+        print(f"[Bluebeam Export] Processing page {page_number}, PDF: {pdf_rect.width:.0f}x{pdf_rect.height:.0f}, Image: {image_width}x{image_height}, scale: {scale_x:.3f}x{scale_y:.3f}", flush=True)
 
         # Get detections for this page
         detections = supabase_request('GET', 'extraction_detection_details', filters={
