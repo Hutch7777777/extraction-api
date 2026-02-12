@@ -224,19 +224,31 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
 
         print(f"[Bluebeam Export] Processing page {page_number}, PDF: {pdf_rect.width:.0f}x{pdf_rect.height:.0f}, Image: {image_width}x{image_height}, scale: {scale_x:.3f}x{scale_y:.3f}", flush=True)
 
-        # Get detections for this page
-        detections = supabase_request('GET', 'extraction_detection_details', filters={
+        # Get detections for this page - PRIORITIZE DRAFTS (user edits)
+        # First check extraction_detections_draft (where user edits are saved)
+        detections = supabase_request('GET', 'extraction_detections_draft', filters={
             'page_id': f'eq.{page_id}',
-            'status': 'neq.deleted',
+            'is_deleted': 'eq.false',
             'order': 'class,detection_index'
         })
 
-        if not detections:
-            # Try without status filter (older schema)
+        if detections:
+            print(f"[Bluebeam Export] Found {len(detections)} DRAFT detections (user-edited)", flush=True)
+        else:
+            # No drafts - fall back to original AI detections
+            print(f"[Bluebeam Export] No drafts found, loading original detections", flush=True)
             detections = supabase_request('GET', 'extraction_detection_details', filters={
                 'page_id': f'eq.{page_id}',
-                'order': 'class'
+                'status': 'neq.deleted',
+                'order': 'class,detection_index'
             })
+
+            if not detections:
+                # Try without status filter (older schema)
+                detections = supabase_request('GET', 'extraction_detection_details', filters={
+                    'page_id': f'eq.{page_id}',
+                    'order': 'class'
+                })
 
         if not detections:
             print(f"[Bluebeam Export] No detections for page {page_number}", flush=True)
@@ -250,29 +262,101 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
             color_rgb = get_detection_color(cls)
             color_fitz = rgb_to_fitz(color_rgb)
 
-            # Get pixel coordinates (center-based)
+            # Check for polygon points (user-drawn polygons)
+            polygon_points = det.get('polygon_points')
+            markup_type = det.get('markup_type', 'polygon')
+
+            # Get pixel coordinates (center-based for bounding box)
             px = float(det.get('pixel_x', 0))
             py = float(det.get('pixel_y', 0))
             pw = float(det.get('pixel_width', 0))
             ph = float(det.get('pixel_height', 0))
 
-            # Calculate bounding box corners
+            # Calculate bounding box corners (used for label positioning and fallback)
             x1 = (px - pw / 2) * scale_x
             y1 = (py - ph / 2) * scale_y
             x2 = (px + pw / 2) * scale_x
             y2 = (py + ph / 2) * scale_y
 
-            # Create rectangle annotation
-            rect = fitz.Rect(x1, y1, x2, y2)
-
             try:
-                # Add rectangle/square annotation (Bluebeam reads these as markups)
-                annot = pdf_page.add_rect_annot(rect)
-                annot.set_colors(stroke=color_fitz)
-                annot.set_border(width=2)
-                annot.set_opacity(0.8)
-                annot.update()
-                total_annotations += 1
+                # Handle different shape types
+                if polygon_points and isinstance(polygon_points, (list, dict)):
+                    # User-drawn polygon - extract outer points
+                    # polygon_points can be [{x, y}, ...] or {outer: [...], holes: [...]}
+                    points_list = polygon_points
+                    if isinstance(polygon_points, dict) and 'outer' in polygon_points:
+                        points_list = polygon_points['outer']
+
+                    if isinstance(points_list, list) and len(points_list) >= 3:
+                        # Convert polygon points to PDF coordinates
+                        pdf_points = []
+                        for pt in points_list:
+                            if isinstance(pt, dict) and 'x' in pt and 'y' in pt:
+                                pdf_x = float(pt['x']) * scale_x
+                                pdf_y = float(pt['y']) * scale_y
+                                pdf_points.append(fitz.Point(pdf_x, pdf_y))
+
+                        if len(pdf_points) >= 3:
+                            # Add polygon annotation
+                            annot = pdf_page.add_polygon_annot(pdf_points)
+                            annot.set_colors(stroke=color_fitz)
+                            annot.set_border(width=2)
+                            annot.set_opacity(0.8)
+                            annot.update()
+                            total_annotations += 1
+                        else:
+                            # Fallback to rectangle if polygon invalid
+                            rect = fitz.Rect(x1, y1, x2, y2)
+                            annot = pdf_page.add_rect_annot(rect)
+                            annot.set_colors(stroke=color_fitz)
+                            annot.set_border(width=2)
+                            annot.set_opacity(0.8)
+                            annot.update()
+                            total_annotations += 1
+                    else:
+                        # Invalid polygon, use rectangle
+                        rect = fitz.Rect(x1, y1, x2, y2)
+                        annot = pdf_page.add_rect_annot(rect)
+                        annot.set_colors(stroke=color_fitz)
+                        annot.set_border(width=2)
+                        annot.set_opacity(0.8)
+                        annot.update()
+                        total_annotations += 1
+
+                elif markup_type == 'line':
+                    # Line markup - draw as line from top-left to bottom-right of bbox
+                    line_start = fitz.Point(x1, y1)
+                    line_end = fitz.Point(x2, y2)
+                    annot = pdf_page.add_line_annot(line_start, line_end)
+                    annot.set_colors(stroke=color_fitz)
+                    annot.set_border(width=2)
+                    annot.set_opacity(0.8)
+                    annot.update()
+                    total_annotations += 1
+
+                elif markup_type == 'point':
+                    # Point markup - draw as small circle at center
+                    center_x = px * scale_x
+                    center_y = py * scale_y
+                    radius = 8  # Small circle
+                    point_rect = fitz.Rect(center_x - radius, center_y - radius,
+                                          center_x + radius, center_y + radius)
+                    annot = pdf_page.add_circle_annot(point_rect)
+                    annot.set_colors(stroke=color_fitz, fill=color_fitz)
+                    annot.set_border(width=2)
+                    annot.set_opacity(0.8)
+                    annot.update()
+                    total_annotations += 1
+
+                else:
+                    # Default: rectangle annotation (Bluebeam reads these as markups)
+                    rect = fitz.Rect(x1, y1, x2, y2)
+                    annot = pdf_page.add_rect_annot(rect)
+                    annot.set_colors(stroke=color_fitz)
+                    annot.set_border(width=2)
+                    annot.set_opacity(0.8)
+                    annot.update()
+                    total_annotations += 1
 
                 # Add text label annotation
                 area_sf = det.get('area_sf', 0)
