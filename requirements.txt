@@ -8,3 +8,4 @@ pdf2image==1.17.0
 gunicorn==21.2.0
 python-dotenv==1.0.0
 aiohttp==3.9.1
+pymupdf==1.24.0

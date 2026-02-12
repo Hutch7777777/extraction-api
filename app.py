@@ -41,7 +41,7 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.6",
+        "version": "4.7",
         "architecture": "modular",
         "features": [
             "markups",
@@ -52,7 +52,8 @@ def health():
             "dimension_sources",
             "roof_intelligence",
             "linear_elements",
-            "intelligent_analysis"  # NEW: Parallel page analysis with comprehensive extraction
+            "intelligent_analysis",
+            "bluebeam_export"  # NEW: Export to Bluebeam-compatible annotated PDF
         ]
     })
 
@@ -467,6 +468,35 @@ def comprehensive_markup():
         })
     
     return jsonify({"error": "page_id or job_id required"}), 400
+
+
+# ============================================================
+# BLUEBEAM EXPORT ENDPOINT
+# ============================================================
+
+@app.route('/export-bluebeam', methods=['POST'])
+def export_bluebeam():
+    """Export detections to Bluebeam-compatible annotated PDF"""
+    from services.bluebeam_service import export_bluebeam_pdf
+
+    data = request.json
+    job_id = data.get('job_id')
+
+    if not job_id:
+        return jsonify({'success': False, 'error': 'job_id required'}), 400
+
+    include_materials = data.get('include_materials', True)
+
+    try:
+        result = export_bluebeam_pdf(job_id, include_materials)
+        if result.get('success'):
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        import traceback
+        print(f"[export-bluebeam] Error: {traceback.format_exc()}", flush=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ============================================================
