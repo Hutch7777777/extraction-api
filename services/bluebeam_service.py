@@ -26,56 +26,74 @@ from database import supabase_request, upload_to_storage
 
 
 # Detection class categorization for measurement types
+# Include both underscore and space variants since DB uses both formats
 AREA_CLASSES = {
-    'building', 'exterior_wall', 'exterior wall', 'gable', 'soffit',
-    'door', 'window', 'garage_door', 'garage'
+    'building',
+    'exterior_wall', 'exterior wall',
+    'gable',
+    'soffit',
+    'door',
+    'window',
+    'garage_door', 'garage door', 'garage',
+    'siding',
+    'roof',
 }
 LINEAR_CLASSES = {
-    'fascia', 'trim', 'corner', 'inside_corner', 'outside_corner',
-    'belly_band', 'rake', 'frieze', 'flashing', 'eave'
+    'fascia',
+    'trim',
+    'belly_band', 'belly band',
+    'rake',
+    'frieze',
+    'flashing',
+    'eave',
 }
 POINT_CLASSES = {
-    'hose_bib', 'vent', 'light_fixture', 'outlet', 'corbel'
+    'hose_bib', 'hose bib',
+    'vent',
+    'light_fixture', 'light fixture',
+    'outlet',
+    'corbel',
+    # Corner markers are points, not linear measurements
+    'corner',
+    'corner_inside', 'corner inside', 'inside_corner', 'inside corner',
+    'corner_outside', 'corner outside', 'outside_corner', 'outside corner',
 }
 
 
 # =============================================================================
 # PIXEL-TO-REAL-WORLD CONVERSION FUNCTIONS
 # =============================================================================
+# IMPORTANT: scale_ratio from extraction_pages is PIXELS PER FOOT
+# (already accounts for image resizing from original scan)
+# To convert: feet = pixels / scale_ratio
 
-def pixels_to_feet(pixels: float, scale_ratio: float, dpi: float) -> float:
+def pixels_to_feet(pixels: float, scale_ratio: float) -> float:
     """
     Convert pixel measurement to real-world feet.
 
-    Formula:
-    - 1 pixel = (1/DPI) inches on paper
-    - 1 inch on paper = (scale_ratio/12) feet in real world
-    - So: 1 pixel = scale_ratio / (DPI * 12) feet
-
     Args:
         pixels: Measurement in pixels
-        scale_ratio: Drawing scale (e.g., 48 for 1/4" = 1'-0")
-        dpi: Dots per inch of the image (e.g., 200)
+        scale_ratio: Pixels per foot (from extraction_pages.scale_ratio)
 
     Returns:
         Real-world measurement in feet
     """
-    if not scale_ratio or not dpi or dpi == 0:
+    if not scale_ratio or float(scale_ratio) == 0:
         return 0.0
-    return float(pixels) * float(scale_ratio) / (float(dpi) * 12.0)
+    return float(pixels) / float(scale_ratio)
 
 
-def calculate_area_sqft(pixel_width: float, pixel_height: float, scale_ratio: float, dpi: float) -> float:
+def calculate_area_sqft(pixel_width: float, pixel_height: float, scale_ratio: float) -> float:
     """Calculate area in square feet from pixel dimensions."""
-    width_ft = pixels_to_feet(pixel_width, scale_ratio, dpi)
-    height_ft = pixels_to_feet(pixel_height, scale_ratio, dpi)
+    width_ft = pixels_to_feet(pixel_width, scale_ratio)
+    height_ft = pixels_to_feet(pixel_height, scale_ratio)
     return width_ft * height_ft
 
 
-def calculate_perimeter_lf(pixel_width: float, pixel_height: float, scale_ratio: float, dpi: float) -> float:
+def calculate_perimeter_lf(pixel_width: float, pixel_height: float, scale_ratio: float) -> float:
     """Calculate perimeter in linear feet from pixel dimensions."""
-    width_ft = pixels_to_feet(pixel_width, scale_ratio, dpi)
-    height_ft = pixels_to_feet(pixel_height, scale_ratio, dpi)
+    width_ft = pixels_to_feet(pixel_width, scale_ratio)
+    height_ft = pixels_to_feet(pixel_height, scale_ratio)
     return 2 * (width_ft + height_ft)
 
 
@@ -108,14 +126,13 @@ def polygon_area_pixels(points: List) -> float:
     return abs(area) / 2.0
 
 
-def calculate_polygon_area_sqft(polygon_points: List, scale_ratio: float, dpi: float) -> float:
+def calculate_polygon_area_sqft(polygon_points: List, scale_ratio: float) -> float:
     """
     Calculate real-world area from polygon pixel coordinates.
 
     Args:
         polygon_points: List of points as [{x, y}, ...] or {outer: [...], holes: [...]}
-        scale_ratio: Drawing scale
-        dpi: Image DPI
+        scale_ratio: Pixels per foot
 
     Returns:
         Area in square feet
@@ -129,19 +146,21 @@ def calculate_polygon_area_sqft(polygon_points: List, scale_ratio: float, dpi: f
     if not points or not isinstance(points, list):
         return 0.0
 
+    if not scale_ratio or float(scale_ratio) == 0:
+        return 0.0
+
     pixel_area = polygon_area_pixels(points)
-    ft_per_pixel = pixels_to_feet(1.0, scale_ratio, dpi)
+    ft_per_pixel = 1.0 / float(scale_ratio)
     return pixel_area * (ft_per_pixel ** 2)
 
 
-def calculate_polygon_perimeter_lf(polygon_points: List, scale_ratio: float, dpi: float) -> float:
+def calculate_polygon_perimeter_lf(polygon_points: List, scale_ratio: float) -> float:
     """
     Calculate perimeter of a polygon in linear feet.
 
     Args:
         polygon_points: List of points as [{x, y}, ...]
-        scale_ratio: Drawing scale
-        dpi: Image DPI
+        scale_ratio: Pixels per foot
 
     Returns:
         Perimeter in linear feet
@@ -169,7 +188,7 @@ def calculate_polygon_perimeter_lf(polygon_points: List, scale_ratio: float, dpi
         # Distance formula
         perimeter_pixels += ((xj - xi) ** 2 + (yj - yi) ** 2) ** 0.5
 
-    return pixels_to_feet(perimeter_pixels, scale_ratio, dpi)
+    return pixels_to_feet(perimeter_pixels, scale_ratio)
 
 
 def get_image_dimensions(image_url: str) -> tuple:
@@ -257,22 +276,21 @@ def get_measurement_type(det_class: str) -> tuple:
 
 def calculate_detection_measurement(
     detection: Dict[str, Any],
-    scale_ratio: float,
-    dpi: float
+    scale_ratio: float
 ) -> tuple:
     """
     Calculate the real-world measurement for a detection from pixel coordinates.
 
     Args:
         detection: Detection dict with pixel_x, pixel_y, pixel_width, pixel_height, polygon_points
-        scale_ratio: Drawing scale (e.g., 48 for 1/4" = 1'-0")
-        dpi: Image DPI
+        scale_ratio: Pixels per foot (from extraction_pages.scale_ratio)
 
     Returns:
         tuple: (value, unit, intent) - the calculated measurement
     """
     det_class = detection.get('class', 'unknown')
-    det_class_normalized = det_class.lower().replace(' ', '_')
+    # Normalize: lowercase and handle both space and underscore variants
+    det_class_normalized = det_class.lower()
 
     # Get pixel dimensions
     pixel_w = float(detection.get('pixel_width', 0) or 0)
@@ -282,20 +300,20 @@ def calculate_detection_measurement(
     unit, intent = get_measurement_type(det_class)
 
     # Calculate based on class type
-    if det_class_normalized in AREA_CLASSES:
+    if det_class_normalized in AREA_CLASSES or det_class_normalized.replace(' ', '_') in AREA_CLASSES:
         # For area classes, prefer polygon area if available
         if polygon_points:
-            value = calculate_polygon_area_sqft(polygon_points, scale_ratio, dpi)
+            value = calculate_polygon_area_sqft(polygon_points, scale_ratio)
         else:
-            value = calculate_area_sqft(pixel_w, pixel_h, scale_ratio, dpi)
+            value = calculate_area_sqft(pixel_w, pixel_h, scale_ratio)
 
-    elif det_class_normalized in LINEAR_CLASSES:
+    elif det_class_normalized in LINEAR_CLASSES or det_class_normalized.replace(' ', '_') in LINEAR_CLASSES:
         # For linear classes, calculate from polygon perimeter or use height as primary
         if polygon_points:
-            value = calculate_polygon_perimeter_lf(polygon_points, scale_ratio, dpi)
+            value = calculate_polygon_perimeter_lf(polygon_points, scale_ratio)
         else:
             # For linear elements like fascia, trim, use the longer dimension
-            value = pixels_to_feet(max(pixel_w, pixel_h), scale_ratio, dpi)
+            value = pixels_to_feet(max(pixel_w, pixel_h), scale_ratio)
 
     else:
         # Point/count items
@@ -607,10 +625,10 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
         print(f"[Bluebeam Export] Processing page {page_number}, PDF: {pdf_rect.width:.0f}x{pdf_rect.height:.0f}, Image: {image_width}x{image_height}, scale: {scale_x:.3f}x{scale_y:.3f}", flush=True)
 
         # Get page scale info for real-world measurement calculations
+        # scale_ratio is pixels per foot (already accounts for image resolution)
         page_scale_ratio = float(page_data.get('scale_ratio', 0) or 0)
-        page_dpi = float(page_data.get('dpi', 200) or 200)
 
-        print(f"[Bluebeam Export] Page scale: ratio={page_scale_ratio}, dpi={page_dpi}", flush=True)
+        print(f"[Bluebeam Export] Page scale: ratio={page_scale_ratio} pixels/ft", flush=True)
 
         # Get detections for this page - PRIORITIZE DRAFTS (user edits)
         # First check extraction_detections_draft (where user edits are saved)
@@ -675,6 +693,8 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                 annot = None
 
                 # Handle different shape types
+                # IMPORTANT: Always use polygon annotations (not rect) so Bluebeam
+                # recognizes them as measurement markups with SF/LF values
                 if polygon_points and isinstance(polygon_points, (list, dict)):
                     # User-drawn polygon - extract outer points
                     # polygon_points can be [{x, y}, ...] or {outer: [...], holes: [...]}
@@ -698,16 +718,26 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                             annot.set_border(width=2)
                             annot.set_opacity(0.8)
                         else:
-                            # Fallback to rectangle if polygon invalid
-                            rect = fitz.Rect(x1, y1, x2, y2)
-                            annot = pdf_page.add_rect_annot(rect)
+                            # Fallback to bbox as polygon (not rect!)
+                            rect_as_polygon = [
+                                fitz.Point(x1, y1),
+                                fitz.Point(x2, y1),
+                                fitz.Point(x2, y2),
+                                fitz.Point(x1, y2)
+                            ]
+                            annot = pdf_page.add_polygon_annot(rect_as_polygon)
                             annot.set_colors(stroke=color_fitz)
                             annot.set_border(width=2)
                             annot.set_opacity(0.8)
                     else:
-                        # Invalid polygon, use rectangle
-                        rect = fitz.Rect(x1, y1, x2, y2)
-                        annot = pdf_page.add_rect_annot(rect)
+                        # Invalid polygon, use bbox as polygon
+                        rect_as_polygon = [
+                            fitz.Point(x1, y1),
+                            fitz.Point(x2, y1),
+                            fitz.Point(x2, y2),
+                            fitz.Point(x1, y2)
+                        ]
+                        annot = pdf_page.add_polygon_annot(rect_as_polygon)
                         annot.set_colors(stroke=color_fitz)
                         annot.set_border(width=2)
                         annot.set_opacity(0.8)
@@ -734,16 +764,21 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     annot.set_opacity(0.8)
 
                 else:
-                    # Default: rectangle annotation (Bluebeam reads these as markups)
-                    rect = fitz.Rect(x1, y1, x2, y2)
-                    annot = pdf_page.add_rect_annot(rect)
+                    # Default: Use polygon annotation (not rect!) so Bluebeam reads as area
+                    rect_as_polygon = [
+                        fitz.Point(x1, y1),
+                        fitz.Point(x2, y1),
+                        fitz.Point(x2, y2),
+                        fitz.Point(x1, y2)
+                    ]
+                    annot = pdf_page.add_polygon_annot(rect_as_polygon)
                     annot.set_colors(stroke=color_fitz)
                     annot.set_border(width=2)
                     annot.set_opacity(0.8)
 
                 # Calculate real-world measurement for this detection
                 meas_value, meas_unit, meas_intent = calculate_detection_measurement(
-                    det, page_scale_ratio, page_dpi
+                    det, page_scale_ratio
                 )
 
                 # Get material name if assigned
@@ -785,7 +820,7 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
 
         # Add page summary legend
         try:
-            _add_page_legend(pdf_page, detections, page_scale_ratio, page_dpi)
+            _add_page_legend(pdf_page, detections, page_scale_ratio)
         except Exception as e:
             print(f"[Bluebeam Export] Error adding legend: {e}", flush=True)
 
@@ -852,7 +887,7 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
     }
 
 
-def _add_page_legend(pdf_page, detections: List[Dict], scale_ratio: float, dpi: float):
+def _add_page_legend(pdf_page, detections: List[Dict], scale_ratio: float):
     """Add a summary legend to the page corner with calculated measurements."""
 
     # Count detections by class and aggregate measurements
@@ -861,7 +896,7 @@ def _add_page_legend(pdf_page, detections: List[Dict], scale_ratio: float, dpi: 
 
     for det in detections:
         cls = det.get('class', 'unknown')
-        value, unit, _ = calculate_detection_measurement(det, scale_ratio, dpi)
+        value, unit, _ = calculate_detection_measurement(det, scale_ratio)
 
         if cls not in class_counts:
             class_counts[cls] = 0
