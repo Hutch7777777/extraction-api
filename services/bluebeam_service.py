@@ -139,53 +139,59 @@ def get_measurement_value_and_unit(detection: Dict[str, Any]) -> tuple:
     return value, unit, intent
 
 
-def set_annotation_metadata(doc, annot, detection: Dict[str, Any]):
+def set_annotation_info_before_update(annot, detection: Dict[str, Any]):
     """
-    Set PDF annotation metadata for Bluebeam measurement display.
-
-    This modifies the PDF dictionary using xref keys so Bluebeam's
-    Markup List shows useful estimation data instead of "1 Count".
+    Set annotation info using annot.set_info() BEFORE calling update().
+    This is more reliable than xref manipulation for basic metadata.
     """
-    xref = annot.xref
     det_class = detection.get('class', 'unknown')
     material = detection.get('material_assignment', {}) or {}
 
     # Get measurement value and unit
-    value, unit, intent = get_measurement_value_and_unit(detection)
+    value, unit, _ = get_measurement_value_and_unit(detection)
 
     # Format display class name
     display_class = det_class.replace('_', ' ').title()
 
-    # Build Subject - Bluebeam groups by this
-    doc.xref_set_key(xref, "Subj", f"({display_class})")
-
-    # Set Intent - tells Bluebeam this is a measurement annotation
-    doc.xref_set_key(xref, "IT", intent)
-
-    # Build Contents/Comments with measurement and material info
+    # Build content/comments with measurement and material info
     parts = [f"{value:.1f} {unit}"]
     if material.get('product_name'):
         parts.append(material['product_name'])
     if material.get('manufacturer'):
         parts.append(f"Mfr: {material['manufacturer']}")
     contents = ' | '.join(parts)
-    doc.xref_set_key(xref, "Contents", f"({contents})")
 
-    # Set Author for branding
-    doc.xref_set_key(xref, "T", "(EstimatePros.ai)")
+    # Use PyMuPDF's built-in method - more reliable than xref manipulation
+    annot.set_info(
+        title="EstimatePros.ai",  # Shows as Author in Bluebeam
+        subject=display_class,    # Shows as Subject in Bluebeam (groups by this)
+        content=contents          # Shows as Comments in Bluebeam
+    )
 
-    # Add Measure dictionary for area measurements
+
+def set_annotation_metadata_after_update(doc, annot, detection: Dict[str, Any]):
+    """
+    Set PDF annotation xref keys AFTER calling update().
+    This sets the Intent and Measure dictionary for Bluebeam measurement display.
+    """
+    xref = annot.xref
+    det_class = detection.get('class', 'unknown')
+
+    # Get measurement value and unit
+    value, unit, intent = get_measurement_value_and_unit(detection)
     det_class_normalized = det_class.lower().replace(' ', '_')
 
+    # Set Intent - tells Bluebeam this is a measurement annotation
+    doc.xref_set_key(xref, "IT", intent)
+
+    # Add Measure dictionary for area measurements
     if det_class_normalized in AREA_CLASSES and value > 0:
         measure_dict = (
-            "<<"
-            "/Type /Measure "
-            "/Subtype /RL "
-            "/R (1 in = 1 ft) "
-            "/X [<< /Type /NumberFormat /U (ft) /C 1.0 /F /D /D 100 >>] "
-            "/A [<< /Type /NumberFormat /U (SF) /C 1.0 /F /D /D 100 >>] "
-            "/D [<< /Type /NumberFormat /U (ft) /C 1.0 /F /D /D 100 >>] "
+            "<< /Type /Measure /Subtype /RL "
+            "/R (1 ft = 1 ft) "
+            "/X [ << /Type /NumberFormat /U (ft) /C 0.0833333 /F /D /D 100 /FD false >> ] "
+            "/D [ << /Type /NumberFormat /U (ft) /C 0.0833333 /F /D /D 100 /FD false >> ] "
+            "/A [ << /Type /NumberFormat /U (SF) /C 0.00694444 /F /D /D 100 /FD false >> ] "
             ">>"
         )
         doc.xref_set_key(xref, "Measure", measure_dict)
@@ -193,12 +199,10 @@ def set_annotation_metadata(doc, annot, detection: Dict[str, Any]):
     # For linear measurements
     elif det_class_normalized in LINEAR_CLASSES and value > 0:
         measure_dict = (
-            "<<"
-            "/Type /Measure "
-            "/Subtype /RL "
-            "/R (1 in = 1 ft) "
-            "/X [<< /Type /NumberFormat /U (ft) /C 1.0 /F /D /D 100 >>] "
-            "/D [<< /Type /NumberFormat /U (LF) /C 1.0 /F /D /D 100 >>] "
+            "<< /Type /Measure /Subtype /RL "
+            "/R (1 ft = 1 ft) "
+            "/X [ << /Type /NumberFormat /U (ft) /C 0.0833333 /F /D /D 100 /FD false >> ] "
+            "/D [ << /Type /NumberFormat /U (LF) /C 0.0833333 /F /D /D 100 /FD false >> ] "
             ">>"
         )
         doc.xref_set_key(xref, "Measure", measure_dict)
@@ -420,6 +424,8 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
             y2 = (py + ph / 2) * scale_y
 
             try:
+                annot = None
+
                 # Handle different shape types
                 if polygon_points and isinstance(polygon_points, (list, dict)):
                     # User-drawn polygon - extract outer points
@@ -443,9 +449,6 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                             annot.set_colors(stroke=color_fitz)
                             annot.set_border(width=2)
                             annot.set_opacity(0.8)
-                            annot.update()  # MUST call update() BEFORE modifying xref keys
-                            set_annotation_metadata(pdf_doc, annot, det)
-                            total_annotations += 1
                         else:
                             # Fallback to rectangle if polygon invalid
                             rect = fitz.Rect(x1, y1, x2, y2)
@@ -453,9 +456,6 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                             annot.set_colors(stroke=color_fitz)
                             annot.set_border(width=2)
                             annot.set_opacity(0.8)
-                            annot.update()
-                            set_annotation_metadata(pdf_doc, annot, det)
-                            total_annotations += 1
                     else:
                         # Invalid polygon, use rectangle
                         rect = fitz.Rect(x1, y1, x2, y2)
@@ -463,9 +463,6 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                         annot.set_colors(stroke=color_fitz)
                         annot.set_border(width=2)
                         annot.set_opacity(0.8)
-                        annot.update()
-                        set_annotation_metadata(pdf_doc, annot, det)
-                        total_annotations += 1
 
                 elif markup_type == 'line':
                     # Line markup - draw as line from top-left to bottom-right of bbox
@@ -475,9 +472,6 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     annot.set_colors(stroke=color_fitz)
                     annot.set_border(width=2)
                     annot.set_opacity(0.8)
-                    annot.update()
-                    set_annotation_metadata(pdf_doc, annot, det)
-                    total_annotations += 1
 
                 elif markup_type == 'point':
                     # Point markup - draw as small circle at center
@@ -490,9 +484,6 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     annot.set_colors(stroke=color_fitz, fill=color_fitz)
                     annot.set_border(width=2)
                     annot.set_opacity(0.8)
-                    annot.update()
-                    set_annotation_metadata(pdf_doc, annot, det)
-                    total_annotations += 1
 
                 else:
                     # Default: rectangle annotation (Bluebeam reads these as markups)
@@ -501,8 +492,18 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     annot.set_colors(stroke=color_fitz)
                     annot.set_border(width=2)
                     annot.set_opacity(0.8)
+
+                # Apply metadata and finalize annotation
+                if annot:
+                    # Step 1: Set info BEFORE update (subject, title, content)
+                    set_annotation_info_before_update(annot, det)
+
+                    # Step 2: Call update to apply changes
                     annot.update()
-                    set_annotation_metadata(pdf_doc, annot, det)
+
+                    # Step 3: Set xref keys AFTER update (IT, Measure)
+                    set_annotation_metadata_after_update(pdf_doc, annot, det)
+
                     total_annotations += 1
 
                 # Build visual label text with measurement and material
@@ -511,24 +512,16 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     'material_assignment': None
                 })
 
-                # Position label at top-left of detection
-                # Adjust width based on label length
-                label_width = min(max(len(label_text) * 6, 150), 350)
-                label_rect = fitz.Rect(x1, y1 - 18, x1 + label_width, y1)
-
-                # Add freetext annotation for label
-                text_annot = pdf_page.add_freetext_annot(
-                    label_rect,
+                # Add label as page content text (NOT an annotation)
+                # This way it appears on the drawing but NOT in the Markup List
+                label_point = fitz.Point(x1 + 2, y1 - 4)
+                pdf_page.insert_text(
+                    label_point,
                     label_text,
-                    fontsize=8,
+                    fontsize=7,
                     fontname="helv",
-                    text_color=color_fitz,
-                    fill_color=(1, 1, 1),  # White background
-                    border_color=color_fitz
+                    color=color_fitz
                 )
-                text_annot.set_opacity(0.9)
-                text_annot.update()
-                total_annotations += 1
 
             except Exception as e:
                 print(f"[Bluebeam Export] Error adding annotation: {e}", flush=True)
@@ -540,6 +533,34 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
             print(f"[Bluebeam Export] Error adding legend: {e}", flush=True)
 
     print(f"[Bluebeam Export] Added {total_annotations} total annotations", flush=True)
+
+    # Debug: Check what annotations are actually in the PDF
+    print(f"[Bluebeam Export] === ANNOTATION DEBUG (first page) ===", flush=True)
+    if len(pdf_doc) > 0:
+        debug_page = pdf_doc[0]
+        annot_count = 0
+        for annot in debug_page.annots():
+            annot_count += 1
+            annot_type = annot.type  # Returns (type_int, type_name)
+            xref = annot.xref
+
+            # Read back the keys we set
+            try:
+                subj = pdf_doc.xref_get_key(xref, "Subj")
+                it = pdf_doc.xref_get_key(xref, "IT")
+                measure = pdf_doc.xref_get_key(xref, "Measure")
+                contents = pdf_doc.xref_get_key(xref, "Contents")
+                title = pdf_doc.xref_get_key(xref, "T")
+                print(f"[DEBUG] Annot #{annot_count} | Type: {annot_type} | Subj: {subj} | IT: {it} | T: {title}", flush=True)
+                print(f"[DEBUG]   Contents: {contents[:100] if contents else 'None'}...", flush=True)
+                print(f"[DEBUG]   Measure: {'SET' if measure and measure[0] != 'null' else 'NOT SET'}", flush=True)
+            except Exception as e:
+                print(f"[DEBUG] Annot #{annot_count} | Type: {annot_type} | Error reading keys: {e}", flush=True)
+
+            if annot_count >= 5:  # Only debug first 5 annotations
+                print(f"[DEBUG] ... (showing first 5 of {len(list(debug_page.annots()))} annotations)", flush=True)
+                break
+    print(f"[Bluebeam Export] === END DEBUG ===", flush=True)
 
     # 5. Save to bytes
     pdf_bytes = pdf_doc.tobytes()
@@ -623,25 +644,24 @@ def _add_page_legend(pdf_page, detections: List[Dict], include_materials: bool):
     if total_linear > 0:
         legend_lines.append(f"Total Linear: {total_linear:.1f} LF")
 
-    legend_text = "\n".join(legend_lines)
-
     # Position in top-left corner
     page_rect = pdf_page.rect
     legend_rect = fitz.Rect(10, 10, 250, 10 + len(legend_lines) * 14)
 
-    # Add white background rectangle
+    # Add white background rectangle (page content, not annotation)
     shape = pdf_page.new_shape()
     shape.draw_rect(legend_rect)
     shape.finish(fill=(1, 1, 1), color=(0, 0, 0), width=1)
     shape.commit()
 
-    # Add text annotation
-    text_annot = pdf_page.add_freetext_annot(
-        legend_rect,
-        legend_text,
-        fontsize=9,
-        fontname="cour",  # Courier for aligned text
-        text_color=(0, 0, 0),
-        fill_color=(1, 1, 1, 0.95)
-    )
-    text_annot.update()
+    # Add legend text as page content (NOT annotation - won't appear in Markup List)
+    y_pos = 22
+    for line in legend_lines:
+        pdf_page.insert_text(
+            fitz.Point(15, y_pos),
+            line,
+            fontsize=9,
+            fontname="cour",  # Courier for aligned text
+            color=(0, 0, 0)
+        )
+        y_pos += 12
