@@ -499,7 +499,9 @@ def build_label_text(
 
 def lookup_materials(detections: List[Dict], supabase_request_fn) -> Dict[str, Dict]:
     """
-    Batch lookup material names from product_catalog for all detections.
+    Batch lookup material names from pricing_items table for all detections.
+
+    Note: assigned_material_id references pricing_items, NOT product_catalog.
 
     Args:
         detections: List of detection dicts with assigned_material_id
@@ -509,11 +511,10 @@ def lookup_materials(detections: List[Dict], supabase_request_fn) -> Dict[str, D
         Dict mapping material_id -> material info dict
     """
     # Collect unique material IDs
-    assigned_ids = set()
-    for det in detections:
-        mid = det.get('assigned_material_id')
-        if mid:
-            assigned_ids.add(mid)
+    assigned_ids = set(
+        det.get('assigned_material_id') for det in detections
+        if det.get('assigned_material_id')
+    )
 
     if not assigned_ids:
         return {}
@@ -521,7 +522,7 @@ def lookup_materials(detections: List[Dict], supabase_request_fn) -> Dict[str, D
     materials_lookup = {}
     for mid in assigned_ids:
         try:
-            result = supabase_request_fn('GET', 'product_catalog', filters={'id': f'eq.{mid}'})
+            result = supabase_request_fn('GET', 'pricing_items', filters={'id': f'eq.{mid}'})
             if result and len(result) > 0:
                 materials_lookup[mid] = result[0]
         except Exception as e:
@@ -532,11 +533,11 @@ def lookup_materials(detections: List[Dict], supabase_request_fn) -> Dict[str, D
 
 def get_material_name(detection: Dict, materials_lookup: Dict) -> str:
     """
-    Get the material name for a detection from the lookup dict.
+    Get the display name for a detection's assigned material.
 
     Args:
         detection: Detection dict with assigned_material_id
-        materials_lookup: Dict from lookup_materials()
+        materials_lookup: Dict from lookup_materials() (pricing_items data)
 
     Returns:
         Material name string or empty string
@@ -546,13 +547,13 @@ def get_material_name(detection: Dict, materials_lookup: Dict) -> str:
         return ''
 
     mat = materials_lookup[mid]
-    # Try various name fields
-    return (
-        mat.get('display_name') or
-        mat.get('product_name') or
-        mat.get('name') or
-        ''
-    )
+    # pricing_items uses 'product_name' and 'manufacturer' fields
+    name = mat.get('product_name', '')
+    manufacturer = mat.get('manufacturer', '')
+
+    if manufacturer and name:
+        return f"{manufacturer} - {name}"
+    return name or ''
 
 
 def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str, Any]:
