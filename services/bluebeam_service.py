@@ -59,6 +59,9 @@ POINT_CLASSES = {
     'corner_outside', 'corner outside', 'outside_corner', 'outside corner',
 }
 
+# Classes to skip in Bluebeam export (helper markups for detection, not estimation)
+SKIP_CLASSES = {'building'}
+
 
 # =============================================================================
 # PIXEL-TO-REAL-WORLD CONVERSION FUNCTIONS
@@ -735,6 +738,11 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
         # Add annotations for each detection
         for det in detections:
             cls = det.get('class', 'unknown')
+
+            # Skip helper classes that are used for detection only, not estimation
+            if cls.lower() in SKIP_CLASSES:
+                continue
+
             color_rgb = get_detection_color(cls)
             color_fitz = rgb_to_fitz(color_rgb)
 
@@ -961,6 +969,11 @@ def _add_page_legend(pdf_page, detections: List[Dict], scale_ratio: float):
 
     for det in detections:
         cls = det.get('class', 'unknown')
+
+        # Skip helper classes that are used for detection only, not estimation
+        if cls.lower() in SKIP_CLASSES:
+            continue
+
         value, unit, _ = calculate_detection_measurement(det, scale_ratio)
 
         if cls not in class_counts:
