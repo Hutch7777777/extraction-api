@@ -39,6 +39,139 @@ POINT_CLASSES = {
 }
 
 
+# =============================================================================
+# PIXEL-TO-REAL-WORLD CONVERSION FUNCTIONS
+# =============================================================================
+
+def pixels_to_feet(pixels: float, scale_ratio: float, dpi: float) -> float:
+    """
+    Convert pixel measurement to real-world feet.
+
+    Formula:
+    - 1 pixel = (1/DPI) inches on paper
+    - 1 inch on paper = (scale_ratio/12) feet in real world
+    - So: 1 pixel = scale_ratio / (DPI * 12) feet
+
+    Args:
+        pixels: Measurement in pixels
+        scale_ratio: Drawing scale (e.g., 48 for 1/4" = 1'-0")
+        dpi: Dots per inch of the image (e.g., 200)
+
+    Returns:
+        Real-world measurement in feet
+    """
+    if not scale_ratio or not dpi or dpi == 0:
+        return 0.0
+    return float(pixels) * float(scale_ratio) / (float(dpi) * 12.0)
+
+
+def calculate_area_sqft(pixel_width: float, pixel_height: float, scale_ratio: float, dpi: float) -> float:
+    """Calculate area in square feet from pixel dimensions."""
+    width_ft = pixels_to_feet(pixel_width, scale_ratio, dpi)
+    height_ft = pixels_to_feet(pixel_height, scale_ratio, dpi)
+    return width_ft * height_ft
+
+
+def calculate_perimeter_lf(pixel_width: float, pixel_height: float, scale_ratio: float, dpi: float) -> float:
+    """Calculate perimeter in linear feet from pixel dimensions."""
+    width_ft = pixels_to_feet(pixel_width, scale_ratio, dpi)
+    height_ft = pixels_to_feet(pixel_height, scale_ratio, dpi)
+    return 2 * (width_ft + height_ft)
+
+
+def polygon_area_pixels(points: List) -> float:
+    """
+    Calculate polygon area in pixel space using the shoelace formula.
+
+    Args:
+        points: List of points as [{x, y}, ...] or [[x, y], ...]
+
+    Returns:
+        Area in square pixels
+    """
+    n = len(points)
+    if n < 3:
+        return 0.0
+
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        # Handle both {x,y} dict format and [x,y] array format
+        if isinstance(points[i], dict):
+            xi, yi = float(points[i].get('x', 0)), float(points[i].get('y', 0))
+            xj, yj = float(points[j].get('x', 0)), float(points[j].get('y', 0))
+        else:
+            xi, yi = float(points[i][0]), float(points[i][1])
+            xj, yj = float(points[j][0]), float(points[j][1])
+        area += xi * yj - xj * yi
+
+    return abs(area) / 2.0
+
+
+def calculate_polygon_area_sqft(polygon_points: List, scale_ratio: float, dpi: float) -> float:
+    """
+    Calculate real-world area from polygon pixel coordinates.
+
+    Args:
+        polygon_points: List of points as [{x, y}, ...] or {outer: [...], holes: [...]}
+        scale_ratio: Drawing scale
+        dpi: Image DPI
+
+    Returns:
+        Area in square feet
+    """
+    # Handle nested format {outer: [...], holes: [...]}
+    if isinstance(polygon_points, dict) and 'outer' in polygon_points:
+        points = polygon_points['outer']
+    else:
+        points = polygon_points
+
+    if not points or not isinstance(points, list):
+        return 0.0
+
+    pixel_area = polygon_area_pixels(points)
+    ft_per_pixel = pixels_to_feet(1.0, scale_ratio, dpi)
+    return pixel_area * (ft_per_pixel ** 2)
+
+
+def calculate_polygon_perimeter_lf(polygon_points: List, scale_ratio: float, dpi: float) -> float:
+    """
+    Calculate perimeter of a polygon in linear feet.
+
+    Args:
+        polygon_points: List of points as [{x, y}, ...]
+        scale_ratio: Drawing scale
+        dpi: Image DPI
+
+    Returns:
+        Perimeter in linear feet
+    """
+    # Handle nested format
+    if isinstance(polygon_points, dict) and 'outer' in polygon_points:
+        points = polygon_points['outer']
+    else:
+        points = polygon_points
+
+    if not points or not isinstance(points, list) or len(points) < 2:
+        return 0.0
+
+    perimeter_pixels = 0.0
+    n = len(points)
+    for i in range(n):
+        j = (i + 1) % n
+        if isinstance(points[i], dict):
+            xi, yi = float(points[i].get('x', 0)), float(points[i].get('y', 0))
+            xj, yj = float(points[j].get('x', 0)), float(points[j].get('y', 0))
+        else:
+            xi, yi = float(points[i][0]), float(points[i][1])
+            xj, yj = float(points[j][0]), float(points[j][1])
+
+        # Distance formula
+        perimeter_pixels += ((xj - xi) ** 2 + (yj - yi) ** 2) ** 0.5
+
+    return pixels_to_feet(perimeter_pixels, scale_ratio, dpi)
+
+
 def get_image_dimensions(image_url: str) -> tuple:
     """
     Fetch an image and return its dimensions (width, height).
@@ -105,63 +238,99 @@ def get_detection_color(class_name: str) -> tuple:
     return BLUEBEAM_COLORS.get(normalized, (200, 200, 200))  # Gray default
 
 
-def get_measurement_value_and_unit(detection: Dict[str, Any]) -> tuple:
+def get_measurement_type(det_class: str) -> tuple:
     """
-    Determine the measurement value and unit based on detection class.
+    Determine the measurement type (unit and intent) based on detection class.
 
     Returns:
-        tuple: (value, unit, intent) where intent is the PDF annotation intent
+        tuple: (unit, intent) where intent is the PDF annotation intent
     """
-    det_class = detection.get('class', 'unknown').lower().replace(' ', '_')
-    dimensions = detection.get('dimensions', {}) or {}
+    det_class_normalized = det_class.lower().replace(' ', '_')
 
-    # Also check top-level fields for backwards compatibility
-    area_sqft = dimensions.get('area_sqft') or detection.get('area_sf', 0)
-    perimeter_lf = dimensions.get('perimeter_lf', 0)
-    length_lf = dimensions.get('length_lf', 0)
-    height_ft = dimensions.get('height_ft') or detection.get('real_height_ft', 0)
+    if det_class_normalized in AREA_CLASSES:
+        return 'SF', '/PolygonDimension'
+    elif det_class_normalized in LINEAR_CLASSES:
+        return 'LF', '/PolyLineDimension'
+    else:
+        return 'EA', '/PolygonDimension'
 
-    if det_class in AREA_CLASSES:
-        value = float(area_sqft or 0)
-        unit = 'SF'
-        intent = '/PolygonDimension'
-    elif det_class in LINEAR_CLASSES:
-        # Prefer perimeter, then length, then height
-        value = float(perimeter_lf or length_lf or height_ft or 0)
-        unit = 'LF'
-        intent = '/PolyLineDimension'
+
+def calculate_detection_measurement(
+    detection: Dict[str, Any],
+    scale_ratio: float,
+    dpi: float
+) -> tuple:
+    """
+    Calculate the real-world measurement for a detection from pixel coordinates.
+
+    Args:
+        detection: Detection dict with pixel_x, pixel_y, pixel_width, pixel_height, polygon_points
+        scale_ratio: Drawing scale (e.g., 48 for 1/4" = 1'-0")
+        dpi: Image DPI
+
+    Returns:
+        tuple: (value, unit, intent) - the calculated measurement
+    """
+    det_class = detection.get('class', 'unknown')
+    det_class_normalized = det_class.lower().replace(' ', '_')
+
+    # Get pixel dimensions
+    pixel_w = float(detection.get('pixel_width', 0) or 0)
+    pixel_h = float(detection.get('pixel_height', 0) or 0)
+    polygon_points = detection.get('polygon_points')
+
+    unit, intent = get_measurement_type(det_class)
+
+    # Calculate based on class type
+    if det_class_normalized in AREA_CLASSES:
+        # For area classes, prefer polygon area if available
+        if polygon_points:
+            value = calculate_polygon_area_sqft(polygon_points, scale_ratio, dpi)
+        else:
+            value = calculate_area_sqft(pixel_w, pixel_h, scale_ratio, dpi)
+
+    elif det_class_normalized in LINEAR_CLASSES:
+        # For linear classes, calculate from polygon perimeter or use height as primary
+        if polygon_points:
+            value = calculate_polygon_perimeter_lf(polygon_points, scale_ratio, dpi)
+        else:
+            # For linear elements like fascia, trim, use the longer dimension
+            value = pixels_to_feet(max(pixel_w, pixel_h), scale_ratio, dpi)
+
     else:
         # Point/count items
         value = 1
-        unit = 'EA'
-        intent = '/PolygonDimension'
 
     return value, unit, intent
 
 
-def set_annotation_info_before_update(annot, detection: Dict[str, Any]):
+def set_annotation_info_before_update(
+    annot,
+    det_class: str,
+    value: float,
+    unit: str,
+    material_name: str = ''
+):
     """
     Set annotation info using annot.set_info() BEFORE calling update().
-    This is more reliable than xref manipulation for basic metadata.
+
+    Args:
+        annot: The PyMuPDF annotation object
+        det_class: Detection class name
+        value: Calculated measurement value
+        unit: Unit string (SF, LF, EA)
+        material_name: Optional material name from product_catalog
     """
-    det_class = detection.get('class', 'unknown')
-    material = detection.get('material_assignment', {}) or {}
-
-    # Get measurement value and unit
-    value, unit, _ = get_measurement_value_and_unit(detection)
-
     # Format display class name
     display_class = det_class.replace('_', ' ').title()
 
     # Build content/comments with measurement and material info
     parts = [f"{value:.1f} {unit}"]
-    if material.get('product_name'):
-        parts.append(material['product_name'])
-    if material.get('manufacturer'):
-        parts.append(f"Mfr: {material['manufacturer']}")
+    if material_name:
+        parts.append(material_name)
     contents = ' | '.join(parts)
 
-    # Use PyMuPDF's built-in method - more reliable than xref manipulation
+    # Use PyMuPDF's built-in method
     annot.set_info(
         title="EstimatePros.ai",  # Shows as Author in Bluebeam
         subject=display_class,    # Shows as Subject in Bluebeam (groups by this)
@@ -169,16 +338,26 @@ def set_annotation_info_before_update(annot, detection: Dict[str, Any]):
     )
 
 
-def set_annotation_metadata_after_update(doc, annot, detection: Dict[str, Any]):
+def set_annotation_metadata_after_update(
+    doc,
+    annot,
+    det_class: str,
+    value: float,
+    unit: str,
+    intent: str
+):
     """
     Set PDF annotation xref keys AFTER calling update().
-    This sets the Intent and Measure dictionary for Bluebeam measurement display.
+
+    Args:
+        doc: The PyMuPDF document
+        annot: The annotation object
+        det_class: Detection class name
+        value: Calculated measurement value
+        unit: Unit string
+        intent: PDF annotation intent string
     """
     xref = annot.xref
-    det_class = detection.get('class', 'unknown')
-
-    # Get measurement value and unit
-    value, unit, intent = get_measurement_value_and_unit(detection)
     det_class_normalized = det_class.lower().replace(' ', '_')
 
     # Set Intent - tells Bluebeam this is a measurement annotation
@@ -208,32 +387,90 @@ def set_annotation_metadata_after_update(doc, annot, detection: Dict[str, Any]):
         doc.xref_set_key(xref, "Measure", measure_dict)
 
 
-def build_label_text(detection: Dict[str, Any]) -> str:
+def build_label_text(
+    det_class: str,
+    value: float,
+    unit: str,
+    material_name: str = ''
+) -> str:
     """
     Build the visual label text that appears on the PDF drawing.
 
     Format: "Class | Value Unit | Material" (material only if assigned)
     Examples:
         - "Exterior Wall | 333.96 SF | HardiePlank 8.25 ColorPlus"
-        - "Window | 19 SF"
+        - "Window | 19.0 SF"
         - "Fascia | 45.2 LF | HardieTrim 5/4"
-        - "Corbel | 1 EA"
+        - "Corbel | 1.0 EA"
     """
-    det_class = detection.get('class', 'unknown')
     display_class = det_class.replace('_', ' ').title()
-    material = detection.get('material_assignment', {}) or {}
-
-    # Get measurement value and unit
-    value, unit, _ = get_measurement_value_and_unit(detection)
 
     # Build label: Class | Value Unit
     label = f"{display_class} | {value:.1f} {unit}"
 
-    # Add material name if assigned (keep concise - no SKU/pricing/manufacturer)
-    if material.get('product_name'):
-        label += f" | {material['product_name']}"
+    # Add material name if assigned
+    if material_name:
+        label += f" | {material_name}"
 
     return label
+
+
+def lookup_materials(detections: List[Dict], supabase_request_fn) -> Dict[str, Dict]:
+    """
+    Batch lookup material names from product_catalog for all detections.
+
+    Args:
+        detections: List of detection dicts with assigned_material_id
+        supabase_request_fn: The supabase_request function
+
+    Returns:
+        Dict mapping material_id -> material info dict
+    """
+    # Collect unique material IDs
+    assigned_ids = set()
+    for det in detections:
+        mid = det.get('assigned_material_id')
+        if mid:
+            assigned_ids.add(mid)
+
+    if not assigned_ids:
+        return {}
+
+    materials_lookup = {}
+    for mid in assigned_ids:
+        try:
+            result = supabase_request_fn('GET', 'product_catalog', filters={'id': f'eq.{mid}'})
+            if result and len(result) > 0:
+                materials_lookup[mid] = result[0]
+        except Exception as e:
+            print(f"[Bluebeam Export] Error looking up material {mid}: {e}", flush=True)
+
+    return materials_lookup
+
+
+def get_material_name(detection: Dict, materials_lookup: Dict) -> str:
+    """
+    Get the material name for a detection from the lookup dict.
+
+    Args:
+        detection: Detection dict with assigned_material_id
+        materials_lookup: Dict from lookup_materials()
+
+    Returns:
+        Material name string or empty string
+    """
+    mid = detection.get('assigned_material_id')
+    if not mid or mid not in materials_lookup:
+        return ''
+
+    mat = materials_lookup[mid]
+    # Try various name fields
+    return (
+        mat.get('display_name') or
+        mat.get('product_name') or
+        mat.get('name') or
+        ''
+    )
 
 
 def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str, Any]:
@@ -369,6 +606,12 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
 
         print(f"[Bluebeam Export] Processing page {page_number}, PDF: {pdf_rect.width:.0f}x{pdf_rect.height:.0f}, Image: {image_width}x{image_height}, scale: {scale_x:.3f}x{scale_y:.3f}", flush=True)
 
+        # Get page scale info for real-world measurement calculations
+        page_scale_ratio = float(page_data.get('scale_ratio', 0) or 0)
+        page_dpi = float(page_data.get('dpi', 200) or 200)
+
+        print(f"[Bluebeam Export] Page scale: ratio={page_scale_ratio}, dpi={page_dpi}", flush=True)
+
         # Get detections for this page - PRIORITIZE DRAFTS (user edits)
         # First check extraction_detections_draft (where user edits are saved)
         detections = supabase_request('GET', 'extraction_detections_draft', filters={
@@ -398,6 +641,11 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
         if not detections:
             print(f"[Bluebeam Export] No detections for page {page_number}", flush=True)
             continue
+
+        # Batch lookup materials for this page's detections
+        materials_lookup = lookup_materials(detections, supabase_request) if include_materials else {}
+        if materials_lookup:
+            print(f"[Bluebeam Export] Loaded {len(materials_lookup)} material assignments", flush=True)
 
         print(f"[Bluebeam Export] Adding {len(detections)} annotations to page {page_number}", flush=True)
 
@@ -493,24 +741,33 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     annot.set_border(width=2)
                     annot.set_opacity(0.8)
 
+                # Calculate real-world measurement for this detection
+                meas_value, meas_unit, meas_intent = calculate_detection_measurement(
+                    det, page_scale_ratio, page_dpi
+                )
+
+                # Get material name if assigned
+                material_name = get_material_name(det, materials_lookup) if include_materials else ''
+
                 # Apply metadata and finalize annotation
                 if annot:
                     # Step 1: Set info BEFORE update (subject, title, content)
-                    set_annotation_info_before_update(annot, det)
+                    set_annotation_info_before_update(
+                        annot, cls, meas_value, meas_unit, material_name
+                    )
 
                     # Step 2: Call update to apply changes
                     annot.update()
 
                     # Step 3: Set xref keys AFTER update (IT, Measure)
-                    set_annotation_metadata_after_update(pdf_doc, annot, det)
+                    set_annotation_metadata_after_update(
+                        pdf_doc, annot, cls, meas_value, meas_unit, meas_intent
+                    )
 
                     total_annotations += 1
 
                 # Build visual label text with measurement and material
-                label_text = build_label_text(det) if include_materials else build_label_text({
-                    **det,
-                    'material_assignment': None
-                })
+                label_text = build_label_text(cls, meas_value, meas_unit, material_name)
 
                 # Add label as page content text (NOT an annotation)
                 # This way it appears on the drawing but NOT in the Markup List
@@ -528,7 +785,7 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
 
         # Add page summary legend
         try:
-            _add_page_legend(pdf_page, detections, include_materials)
+            _add_page_legend(pdf_page, detections, page_scale_ratio, page_dpi)
         except Exception as e:
             print(f"[Bluebeam Export] Error adding legend: {e}", flush=True)
 
@@ -595,8 +852,8 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
     }
 
 
-def _add_page_legend(pdf_page, detections: List[Dict], include_materials: bool):
-    """Add a summary legend to the page corner"""
+def _add_page_legend(pdf_page, detections: List[Dict], scale_ratio: float, dpi: float):
+    """Add a summary legend to the page corner with calculated measurements."""
 
     # Count detections by class and aggregate measurements
     class_counts = {}
@@ -604,7 +861,7 @@ def _add_page_legend(pdf_page, detections: List[Dict], include_materials: bool):
 
     for det in detections:
         cls = det.get('class', 'unknown')
-        value, unit, _ = get_measurement_value_and_unit(det)
+        value, unit, _ = calculate_detection_measurement(det, scale_ratio, dpi)
 
         if cls not in class_counts:
             class_counts[cls] = 0
