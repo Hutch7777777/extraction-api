@@ -191,6 +191,52 @@ def calculate_polygon_perimeter_lf(polygon_points: List, scale_ratio: float) -> 
     return pixels_to_feet(perimeter_pixels, scale_ratio)
 
 
+def calculate_measure_conversion(page_data: Dict, pdf_page_width_pts: float) -> float:
+    """
+    Calculate the feet-per-PDF-point conversion factor for Bluebeam Measure dictionaries.
+
+    PDF uses "points" where 72 points = 1 inch.
+    We need to tell Bluebeam how many real-world feet each PDF point represents.
+
+    We know:
+    - scale_ratio = pixels per foot (from extraction_pages)
+    - original_width = image width in pixels (or image_width)
+    - pdf_page_width_pts = PDF page width in points (from fitz page.rect.width)
+
+    Calculation:
+    - real_width_ft = original_width / scale_ratio
+    - ft_per_pdf_point = real_width_ft / pdf_page_width_pts
+
+    Args:
+        page_data: Page data dict with scale_ratio and original_width/image_width
+        pdf_page_width_pts: PDF page width in points from fitz
+
+    Returns:
+        Feet per PDF point conversion factor
+    """
+    scale_ratio = float(page_data.get('scale_ratio', 0) or 0)
+    # Try multiple field names for original image width
+    original_width = float(
+        page_data.get('original_width', 0) or
+        page_data.get('image_width', 0) or
+        page_data.get('width', 0) or 0
+    )
+
+    if not scale_ratio or not original_width or not pdf_page_width_pts:
+        # Default fallback for 1/4" = 1'-0" scale on 36" wide sheet
+        # 1/4" = 1' means 1 inch = 4 feet, so ft_per_inch = 4
+        # ft_per_point = 4 / 72 = 0.05556
+        print(f"[Bluebeam Export] WARNING: Using default scale conversion (1/4\"=1'-0\")", flush=True)
+        return 0.05556
+
+    real_width_ft = original_width / scale_ratio
+    ft_per_point = real_width_ft / pdf_page_width_pts
+
+    print(f"[Bluebeam Export] Measure conversion: {original_width}px / {scale_ratio}ppf = {real_width_ft:.2f}ft / {pdf_page_width_pts:.0f}pts = {ft_per_point:.6f} ft/pt", flush=True)
+
+    return ft_per_point
+
+
 def get_image_dimensions(image_url: str) -> tuple:
     """
     Fetch an image and return its dimensions (width, height).
@@ -362,7 +408,8 @@ def set_annotation_metadata_after_update(
     det_class: str,
     value: float,
     unit: str,
-    intent: str
+    intent: str,
+    ft_per_point: float = 0.05556
 ):
     """
     Set PDF annotation xref keys AFTER calling update().
@@ -374,6 +421,7 @@ def set_annotation_metadata_after_update(
         value: Calculated measurement value
         unit: Unit string
         intent: PDF annotation intent string
+        ft_per_point: Feet per PDF point conversion factor (from calculate_measure_conversion)
     """
     xref = annot.xref
     det_class_normalized = det_class.lower().replace(' ', '_')
@@ -381,26 +429,39 @@ def set_annotation_metadata_after_update(
     # Set Intent - tells Bluebeam this is a measurement annotation
     doc.xref_set_key(xref, "IT", intent)
 
+    # Calculate conversion factors for Measure dictionary
+    # /C value tells Bluebeam: 1 PDF point = C feet
+    area_conversion = ft_per_point ** 2  # For square feet
+
+    # Calculate the scale ratio for the /R description string
+    # ft_per_point * 72 = feet per inch on paper
+    ft_per_inch = ft_per_point * 72
+    if ft_per_inch > 0:
+        # Express as "1 in = X ft" (e.g., "1 in = 4.00 ft" for 1/4" = 1'-0")
+        scale_desc = f"1 in = {ft_per_inch:.2f} ft"
+    else:
+        scale_desc = "1 ft = 1 ft"
+
     # Add Measure dictionary for area measurements
     if det_class_normalized in AREA_CLASSES and value > 0:
         measure_dict = (
-            "<< /Type /Measure /Subtype /RL "
-            "/R (1 ft = 1 ft) "
-            "/X [ << /Type /NumberFormat /U (ft) /C 0.0833333 /F /D /D 100 /FD false >> ] "
-            "/D [ << /Type /NumberFormat /U (ft) /C 0.0833333 /F /D /D 100 /FD false >> ] "
-            "/A [ << /Type /NumberFormat /U (SF) /C 0.00694444 /F /D /D 100 /FD false >> ] "
-            ">>"
+            f"<< /Type /Measure /Subtype /RL "
+            f"/R ({scale_desc}) "
+            f"/X [ << /Type /NumberFormat /U (ft) /C {ft_per_point:.8f} /F /D /D 100 /FD false >> ] "
+            f"/D [ << /Type /NumberFormat /U (ft) /C {ft_per_point:.8f} /F /D /D 100 /FD false >> ] "
+            f"/A [ << /Type /NumberFormat /U (SF) /C {area_conversion:.10f} /F /D /D 100 /FD false >> ] "
+            f">>"
         )
         doc.xref_set_key(xref, "Measure", measure_dict)
 
     # For linear measurements
     elif det_class_normalized in LINEAR_CLASSES and value > 0:
         measure_dict = (
-            "<< /Type /Measure /Subtype /RL "
-            "/R (1 ft = 1 ft) "
-            "/X [ << /Type /NumberFormat /U (ft) /C 0.0833333 /F /D /D 100 /FD false >> ] "
-            "/D [ << /Type /NumberFormat /U (LF) /C 0.0833333 /F /D /D 100 /FD false >> ] "
-            ">>"
+            f"<< /Type /Measure /Subtype /RL "
+            f"/R ({scale_desc}) "
+            f"/X [ << /Type /NumberFormat /U (ft) /C {ft_per_point:.8f} /F /D /D 100 /FD false >> ] "
+            f"/D [ << /Type /NumberFormat /U (LF) /C {ft_per_point:.8f} /F /D /D 100 /FD false >> ] "
+            f">>"
         )
         doc.xref_set_key(xref, "Measure", measure_dict)
 
@@ -630,6 +691,10 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
 
         print(f"[Bluebeam Export] Page scale: ratio={page_scale_ratio} pixels/ft", flush=True)
 
+        # Calculate conversion factor for Bluebeam Measure dictionary
+        # This tells Bluebeam how many feet each PDF point represents
+        ft_per_point = calculate_measure_conversion(page_data, pdf_rect.width)
+
         # Get detections for this page - PRIORITIZE DRAFTS (user edits)
         # First check extraction_detections_draft (where user edits are saved)
         detections = supabase_request('GET', 'extraction_detections_draft', filters={
@@ -796,7 +861,7 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
 
                     # Step 3: Set xref keys AFTER update (IT, Measure)
                     set_annotation_metadata_after_update(
-                        pdf_doc, annot, cls, meas_value, meas_unit, meas_intent
+                        pdf_doc, annot, cls, meas_value, meas_unit, meas_intent, ft_per_point
                     )
 
                     total_annotations += 1
