@@ -25,6 +25,20 @@ from config import config
 from database import supabase_request, upload_to_storage
 
 
+# Detection class categorization for measurement types
+AREA_CLASSES = {
+    'building', 'exterior_wall', 'exterior wall', 'gable', 'soffit',
+    'door', 'window', 'garage_door', 'garage'
+}
+LINEAR_CLASSES = {
+    'fascia', 'trim', 'corner', 'inside_corner', 'outside_corner',
+    'belly_band', 'rake', 'frieze', 'flashing', 'eave'
+}
+POINT_CLASSES = {
+    'hose_bib', 'vent', 'light_fixture', 'outlet', 'corbel'
+}
+
+
 def get_image_dimensions(image_url: str) -> tuple:
     """
     Fetch an image and return its dimensions (width, height).
@@ -89,6 +103,133 @@ def get_detection_color(class_name: str) -> tuple:
     """Get color for a detection class"""
     normalized = class_name.lower().replace(' ', '_')
     return BLUEBEAM_COLORS.get(normalized, (200, 200, 200))  # Gray default
+
+
+def get_measurement_value_and_unit(detection: Dict[str, Any]) -> tuple:
+    """
+    Determine the measurement value and unit based on detection class.
+
+    Returns:
+        tuple: (value, unit, intent) where intent is the PDF annotation intent
+    """
+    det_class = detection.get('class', 'unknown').lower().replace(' ', '_')
+    dimensions = detection.get('dimensions', {}) or {}
+
+    # Also check top-level fields for backwards compatibility
+    area_sqft = dimensions.get('area_sqft') or detection.get('area_sf', 0)
+    perimeter_lf = dimensions.get('perimeter_lf', 0)
+    length_lf = dimensions.get('length_lf', 0)
+    height_ft = dimensions.get('height_ft') or detection.get('real_height_ft', 0)
+
+    if det_class in AREA_CLASSES:
+        value = float(area_sqft or 0)
+        unit = 'SF'
+        intent = '/PolygonDimension'
+    elif det_class in LINEAR_CLASSES:
+        # Prefer perimeter, then length, then height
+        value = float(perimeter_lf or length_lf or height_ft or 0)
+        unit = 'LF'
+        intent = '/PolyLineDimension'
+    else:
+        # Point/count items
+        value = 1
+        unit = 'EA'
+        intent = '/PolygonDimension'
+
+    return value, unit, intent
+
+
+def set_annotation_metadata(doc, annot, detection: Dict[str, Any]):
+    """
+    Set PDF annotation metadata for Bluebeam measurement display.
+
+    This modifies the PDF dictionary using xref keys so Bluebeam's
+    Markup List shows useful estimation data instead of "1 Count".
+    """
+    xref = annot.xref
+    det_class = detection.get('class', 'unknown')
+    material = detection.get('material_assignment', {}) or {}
+
+    # Get measurement value and unit
+    value, unit, intent = get_measurement_value_and_unit(detection)
+
+    # Format display class name
+    display_class = det_class.replace('_', ' ').title()
+
+    # Build Subject - Bluebeam groups by this
+    doc.xref_set_key(xref, "Subj", f"({display_class})")
+
+    # Set Intent - tells Bluebeam this is a measurement annotation
+    doc.xref_set_key(xref, "IT", intent)
+
+    # Build Contents/Comments with measurement and material info
+    parts = [f"{value:.1f} {unit}"]
+    if material.get('product_name'):
+        parts.append(material['product_name'])
+    if material.get('manufacturer'):
+        parts.append(f"Mfr: {material['manufacturer']}")
+    contents = ' | '.join(parts)
+    doc.xref_set_key(xref, "Contents", f"({contents})")
+
+    # Set Author for branding
+    doc.xref_set_key(xref, "T", "(EstimatePros.ai)")
+
+    # Add Measure dictionary for area measurements
+    det_class_normalized = det_class.lower().replace(' ', '_')
+
+    if det_class_normalized in AREA_CLASSES and value > 0:
+        measure_dict = (
+            "<<"
+            "/Type /Measure "
+            "/Subtype /RL "
+            "/R (1 in = 1 ft) "
+            "/X [<< /Type /NumberFormat /U (ft) /C 1.0 /F /D /D 100 >>] "
+            "/A [<< /Type /NumberFormat /U (SF) /C 1.0 /F /D /D 100 >>] "
+            "/D [<< /Type /NumberFormat /U (ft) /C 1.0 /F /D /D 100 >>] "
+            ">>"
+        )
+        doc.xref_set_key(xref, "Measure", measure_dict)
+
+    # For linear measurements
+    elif det_class_normalized in LINEAR_CLASSES and value > 0:
+        measure_dict = (
+            "<<"
+            "/Type /Measure "
+            "/Subtype /RL "
+            "/R (1 in = 1 ft) "
+            "/X [<< /Type /NumberFormat /U (ft) /C 1.0 /F /D /D 100 >>] "
+            "/D [<< /Type /NumberFormat /U (LF) /C 1.0 /F /D /D 100 >>] "
+            ">>"
+        )
+        doc.xref_set_key(xref, "Measure", measure_dict)
+
+
+def build_label_text(detection: Dict[str, Any]) -> str:
+    """
+    Build the visual label text that appears on the PDF drawing.
+
+    Format: "Class | Value Unit | Material" (material only if assigned)
+    Examples:
+        - "Exterior Wall | 333.96 SF | HardiePlank 8.25 ColorPlus"
+        - "Window | 19 SF"
+        - "Fascia | 45.2 LF | HardieTrim 5/4"
+        - "Corbel | 1 EA"
+    """
+    det_class = detection.get('class', 'unknown')
+    display_class = det_class.replace('_', ' ').title()
+    material = detection.get('material_assignment', {}) or {}
+
+    # Get measurement value and unit
+    value, unit, _ = get_measurement_value_and_unit(detection)
+
+    # Build label: Class | Value Unit
+    label = f"{display_class} | {value:.1f} {unit}"
+
+    # Add material name if assigned (keep concise - no SKU/pricing/manufacturer)
+    if material.get('product_name'):
+        label += f" | {material['product_name']}"
+
+    return label
 
 
 def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str, Any]:
@@ -302,7 +443,8 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                             annot.set_colors(stroke=color_fitz)
                             annot.set_border(width=2)
                             annot.set_opacity(0.8)
-                            annot.update()
+                            annot.update()  # MUST call update() BEFORE modifying xref keys
+                            set_annotation_metadata(pdf_doc, annot, det)
                             total_annotations += 1
                         else:
                             # Fallback to rectangle if polygon invalid
@@ -312,6 +454,7 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                             annot.set_border(width=2)
                             annot.set_opacity(0.8)
                             annot.update()
+                            set_annotation_metadata(pdf_doc, annot, det)
                             total_annotations += 1
                     else:
                         # Invalid polygon, use rectangle
@@ -321,6 +464,7 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                         annot.set_border(width=2)
                         annot.set_opacity(0.8)
                         annot.update()
+                        set_annotation_metadata(pdf_doc, annot, det)
                         total_annotations += 1
 
                 elif markup_type == 'line':
@@ -332,6 +476,7 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     annot.set_border(width=2)
                     annot.set_opacity(0.8)
                     annot.update()
+                    set_annotation_metadata(pdf_doc, annot, det)
                     total_annotations += 1
 
                 elif markup_type == 'point':
@@ -346,6 +491,7 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     annot.set_border(width=2)
                     annot.set_opacity(0.8)
                     annot.update()
+                    set_annotation_metadata(pdf_doc, annot, det)
                     total_annotations += 1
 
                 else:
@@ -356,27 +502,19 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     annot.set_border(width=2)
                     annot.set_opacity(0.8)
                     annot.update()
+                    set_annotation_metadata(pdf_doc, annot, det)
                     total_annotations += 1
 
-                # Add text label annotation
-                area_sf = det.get('area_sf', 0)
-                width_ft = det.get('real_width_ft', 0)
-                height_ft = det.get('real_height_ft', 0)
-                material_name = det.get('assigned_material_name', '') if include_materials else ''
-
-                # Build label text
-                label_parts = [cls.upper()[:6]]
-                if area_sf and area_sf > 0:
-                    label_parts.append(f"{area_sf:.0f}SF")
-                if width_ft and height_ft:
-                    label_parts.append(f"{width_ft:.1f}'x{height_ft:.1f}'")
-                if material_name:
-                    label_parts.append(f"[{material_name[:15]}]")
-
-                label_text = " ".join(label_parts)
+                # Build visual label text with measurement and material
+                label_text = build_label_text(det) if include_materials else build_label_text({
+                    **det,
+                    'material_assignment': None
+                })
 
                 # Position label at top-left of detection
-                label_rect = fitz.Rect(x1, y1 - 15, x1 + 200, y1)
+                # Adjust width based on label length
+                label_width = min(max(len(label_text) * 6, 150), 350)
+                label_rect = fitz.Rect(x1, y1 - 18, x1 + label_width, y1)
 
                 # Add freetext annotation for label
                 text_annot = pdf_page.add_freetext_annot(
@@ -439,33 +577,51 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
 def _add_page_legend(pdf_page, detections: List[Dict], include_materials: bool):
     """Add a summary legend to the page corner"""
 
-    # Count detections by class
+    # Count detections by class and aggregate measurements
     class_counts = {}
-    class_areas = {}
+    class_measurements = {}  # Stores (total_value, unit) per class
 
     for det in detections:
         cls = det.get('class', 'unknown')
-        area = float(det.get('area_sf', 0))
+        value, unit, _ = get_measurement_value_and_unit(det)
 
         if cls not in class_counts:
             class_counts[cls] = 0
-            class_areas[cls] = 0
+            class_measurements[cls] = {'value': 0, 'unit': unit}
         class_counts[cls] += 1
-        class_areas[cls] += area
+        class_measurements[cls]['value'] += value
 
     # Build legend text
     legend_lines = ["DETECTION SUMMARY"]
     legend_lines.append("-" * 30)
 
     for cls, count in sorted(class_counts.items()):
-        area = class_areas.get(cls, 0)
-        legend_lines.append(f"{cls.title()}: {count} ({area:.0f} SF)")
+        measurement = class_measurements.get(cls, {'value': 0, 'unit': 'EA'})
+        value = measurement['value']
+        unit = measurement['unit']
+        legend_lines.append(f"{cls.title()}: {count} ({value:.1f} {unit})")
 
     legend_lines.append("-" * 30)
     total_count = sum(class_counts.values())
-    total_area = sum(class_areas.values())
+
+    # Calculate total area (only for area classes)
+    total_area = sum(
+        class_measurements[cls]['value']
+        for cls in class_counts
+        if cls.lower().replace(' ', '_') in AREA_CLASSES
+    )
+    # Calculate total linear (only for linear classes)
+    total_linear = sum(
+        class_measurements[cls]['value']
+        for cls in class_counts
+        if cls.lower().replace(' ', '_') in LINEAR_CLASSES
+    )
+
     legend_lines.append(f"Total: {total_count} detections")
-    legend_lines.append(f"Total Area: {total_area:.0f} SF")
+    if total_area > 0:
+        legend_lines.append(f"Total Area: {total_area:.1f} SF")
+    if total_linear > 0:
+        legend_lines.append(f"Total Linear: {total_linear:.1f} LF")
 
     legend_text = "\n".join(legend_lines)
 
