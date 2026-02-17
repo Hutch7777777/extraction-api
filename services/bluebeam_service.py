@@ -6,7 +6,8 @@ Uses PyMuPDF (fitz) to create standard PDF annotations.
 """
 
 import io
-import jsonimport requests
+import json
+import requests
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
