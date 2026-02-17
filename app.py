@@ -41,7 +41,7 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.7",
+        "version": "4.8",
         "architecture": "modular",
         "features": [
             "markups",
@@ -53,7 +53,8 @@ def health():
             "roof_intelligence",
             "linear_elements",
             "intelligent_analysis",
-            "bluebeam_export"  # NEW: Export to Bluebeam-compatible annotated PDF
+            "bluebeam_export",
+            "bluebeam_import"  # NEW: Import Bluebeam-edited PDFs for round-trip workflow
         ]
     })
 
@@ -496,6 +497,62 @@ def export_bluebeam():
     except Exception as e:
         import traceback
         print(f"[export-bluebeam] Error: {traceback.format_exc()}", flush=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/import-bluebeam', methods=['POST'])
+def import_bluebeam():
+    """
+    Import a Bluebeam-edited PDF and generate a diff against current detections.
+
+    Accepts multipart form data with:
+    - file: The PDF file to import
+    - job_id: The extraction job UUID to compare against
+    - modification_threshold: (optional) IoU threshold for modifications (default 0.8)
+
+    Returns a diff summary showing MATCHED, MODIFIED, DELETED, and ADDED annotations.
+    Does NOT apply changes - use /apply-bluebeam-changes for that (future endpoint).
+    """
+    from services.bluebeam_import_service import import_bluebeam_pdf
+
+    # Check for file in request
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': 'No file uploaded. Use multipart form with "file" field.'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'success': False, 'error': 'No file selected'}), 400
+
+    # Check file extension
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify({'success': False, 'error': 'File must be a PDF'}), 400
+
+    # Get job_id from form data
+    job_id = request.form.get('job_id')
+    if not job_id:
+        return jsonify({'success': False, 'error': 'job_id required in form data'}), 400
+
+    # Get optional modification threshold
+    try:
+        modification_threshold = float(request.form.get('modification_threshold', 0.8))
+    except ValueError:
+        modification_threshold = 0.8
+
+    try:
+        # Read PDF bytes
+        pdf_bytes = file.read()
+        print(f"[import-bluebeam] Received {len(pdf_bytes)} bytes for job {job_id}", flush=True)
+
+        # Process import
+        result = import_bluebeam_pdf(pdf_bytes, job_id, modification_threshold)
+
+        if result.get('success'):
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+    except Exception as e:
+        import traceback
+        print(f"[import-bluebeam] Error: {traceback.format_exc()}", flush=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
