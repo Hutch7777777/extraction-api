@@ -6,7 +6,7 @@ Uses PyMuPDF (fitz) to create standard PDF annotations.
 """
 
 import io
-import requests
+import jsonimport requests
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
@@ -873,6 +873,12 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                         pdf_doc, annot, cls, meas_value, meas_unit, meas_intent, ft_per_point
                     )
 
+                    # Step 4: Embed round-trip metadata in NM field
+                    try:
+                        rt = json.dumps({"v":1,"det_id":det.get("id"),"page_id":det.get("page_id"),"job_id":det.get("job_id"),"class":cls,"bbox":{"x":det.get("pixel_x"),"y":det.get("pixel_y"),"w":det.get("pixel_width"),"h":det.get("pixel_height")}}, separators=(",",":"))
+                        pdf_doc.xref_set_key(annot.xref, "NM", f"(EST:{rt})")
+                    except Exception as e:
+                        print(f"[Bluebeam Export] NM field error: {e}", flush=True)
                     total_annotations += 1
 
                 # Build visual label text with measurement and material
