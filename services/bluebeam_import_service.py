@@ -303,6 +303,11 @@ def fetch_page_dimensions(job_id: str) -> Dict[int, Tuple[int, int]]:
     if not pages:
         return {}
 
+    # Debug: show available fields from first page
+    if pages and len(pages) > 0:
+        print(f"[Bluebeam Import] First page keys: {list(pages[0].keys())}", flush=True)
+        print(f"[Bluebeam Import] First page values: image_width={pages[0].get('image_width')}, image_height={pages[0].get('image_height')}, width={pages[0].get('width')}, height={pages[0].get('height')}, pdf_width={pages[0].get('pdf_width')}, pdf_height={pages[0].get('pdf_height')}", flush=True)
+
     result = {}
     for page in pages:
         page_num = page.get('page_number', 0)
@@ -310,6 +315,14 @@ def fetch_page_dimensions(job_id: str) -> Dict[int, Tuple[int, int]]:
         height = page.get('image_height') or page.get('height') or 0
         if page_num and width and height:
             result[page_num] = (width, height)
+
+    # Fallback: if no dimensions found but pages exist, use 1:1 mapping
+    if not result and pages:
+        print(f"[Bluebeam Import] WARNING: No dimension fields found, using 1:1 coordinate mapping fallback", flush=True)
+        for page in pages:
+            page_num = page.get('page_number', 0)
+            if page_num:
+                result[page_num] = (1, 1)
 
     return result
 
