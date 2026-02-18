@@ -82,7 +82,7 @@ class ImportedAnnotation:
     """Represents an annotation parsed from a Bluebeam PDF"""
     page_number: int
     pdf_rect: Tuple[float, float, float, float]  # (x1, y1, x2, y2) in PDF coords
-    bbox: BoundingBox  # Converted to pixel coords
+    current_bbox: BoundingBox  # CURRENT position from PDF rect, converted to pixel coords
     subject: Optional[str] = None  # Bluebeam "Subject" field (class name)
     contents: Optional[str] = None  # Bluebeam "Contents" field (measurement)
     roundtrip_metadata: Optional[Dict] = None  # Parsed EST: JSON from NM field
@@ -96,7 +96,7 @@ class ImportedAnnotation:
 
     @property
     def original_bbox(self) -> Optional[BoundingBox]:
-        """Get original bbox from roundtrip metadata"""
+        """Get ORIGINAL bbox from roundtrip metadata (what it was at export time)"""
         if self.roundtrip_metadata and 'bbox' in self.roundtrip_metadata:
             return BoundingBox.from_dict(self.roundtrip_metadata['bbox'])
         return None
@@ -105,7 +105,8 @@ class ImportedAnnotation:
         return {
             'page_number': self.page_number,
             'pdf_rect': self.pdf_rect,
-            'bbox': self.bbox.to_dict(),
+            'current_bbox': self.current_bbox.to_dict(),
+            'original_bbox': self.original_bbox.to_dict() if self.original_bbox else None,
             'subject': self.subject,
             'contents': self.contents,
             'detection_id': self.detection_id,
@@ -246,41 +247,38 @@ def extract_annotations_from_pdf(
             # Parse round-trip metadata from NM field
             roundtrip_metadata = parse_roundtrip_metadata(nm_field)
 
-            # Determine bbox: prefer embedded pixel coords from NM metadata
+            # ALWAYS compute current_bbox from the actual PDF annotation rect.
+            # This is the CURRENT position of the annotation (after any Bluebeam edits).
+            # The NM metadata contains the ORIGINAL position from export time.
+            # By comparing current_bbox vs original_bbox, we can detect user edits.
+            pdf_x1, pdf_y1 = rect.x0, rect.y0
+            pdf_x2, pdf_y2 = rect.x1, rect.y1
+
+            # Scale PDF coords to pixel coords
+            px_x1 = pdf_x1 * scale_x
+            px_y1 = pdf_y1 * scale_y
+            px_x2 = pdf_x2 * scale_x
+            px_y2 = pdf_y2 * scale_y
+
+            # Convert to center-based bbox
+            current_bbox = BoundingBox(
+                x=(px_x1 + px_x2) / 2,
+                y=(px_y1 + px_y2) / 2,
+                w=abs(px_x2 - px_x1),
+                h=abs(px_y2 - px_y1)
+            )
+
+            # Log for debugging
             if roundtrip_metadata and 'bbox' in roundtrip_metadata:
-                # Use the original pixel coordinates stored during export
-                # This avoids coordinate conversion errors when image dimensions are unknown
-                stored_bbox = roundtrip_metadata['bbox']
-                bbox = BoundingBox(
-                    x=float(stored_bbox.get('x', 0)),
-                    y=float(stored_bbox.get('y', 0)),
-                    w=float(stored_bbox.get('w', 0)),
-                    h=float(stored_bbox.get('h', 0))
-                )
-                print(f"[Bluebeam Import] Using stored bbox from NM: {bbox.x:.1f},{bbox.y:.1f} {bbox.w:.1f}x{bbox.h:.1f}", flush=True)
-            else:
-                # No NM metadata - convert PDF coordinates to pixel coordinates
-                pdf_x1, pdf_y1 = rect.x0, rect.y0
-                pdf_x2, pdf_y2 = rect.x1, rect.y1
-
-                # Scale to image pixels
-                px_x1 = pdf_x1 * scale_x
-                px_y1 = pdf_y1 * scale_y
-                px_x2 = pdf_x2 * scale_x
-                px_y2 = pdf_y2 * scale_y
-
-                # Convert to center-based bbox
-                bbox = BoundingBox(
-                    x=(px_x1 + px_x2) / 2,
-                    y=(px_y1 + px_y2) / 2,
-                    w=px_x2 - px_x1,
-                    h=px_y2 - px_y1
-                )
+                orig = roundtrip_metadata['bbox']
+                print(f"[Bluebeam Import] Annotation with NM metadata:", flush=True)
+                print(f"  Original (from NM): center=({orig.get('x', 0):.1f}, {orig.get('y', 0):.1f}), size={orig.get('w', 0):.1f}x{orig.get('h', 0):.1f}", flush=True)
+                print(f"  Current (from PDF rect): center=({current_bbox.x:.1f}, {current_bbox.y:.1f}), size={current_bbox.w:.1f}x{current_bbox.h:.1f}", flush=True)
 
             annotations.append(ImportedAnnotation(
                 page_number=page_number,
                 pdf_rect=(rect.x0, rect.y0, rect.x1, rect.y1),
-                bbox=bbox,
+                current_bbox=current_bbox,
                 subject=subject,
                 contents=contents,
                 roundtrip_metadata=roundtrip_metadata
@@ -428,20 +426,27 @@ def compute_diff(
             det = detections[det_id]
             matched_detection_ids.add(det_id)
 
-            # Get original bbox from detection database record
-            original_bbox = BoundingBox(
-                x=float(det.get('pixel_x', 0)),
-                y=float(det.get('pixel_y', 0)),
-                w=float(det.get('pixel_width', 0)),
-                h=float(det.get('pixel_height', 0))
-            )
+            # Get ORIGINAL bbox from NM metadata (what it was at export time)
+            # This is what we compare against to detect Bluebeam edits
+            original_bbox = annot.original_bbox
+            if not original_bbox:
+                # Fallback to database bbox if NM metadata missing (shouldn't happen)
+                original_bbox = BoundingBox(
+                    x=float(det.get('pixel_x', 0)),
+                    y=float(det.get('pixel_y', 0)),
+                    w=float(det.get('pixel_width', 0)),
+                    h=float(det.get('pixel_height', 0))
+                )
 
-            # Calculate shift between NM bbox and DB bbox
+            # current_bbox is from PDF rect (actual position after user edits in Bluebeam)
+            current_bbox = annot.current_bbox
+
+            # Calculate shift between current (after edit) and original (at export)
             bbox_shift = {
-                'dx': annot.bbox.x - original_bbox.x,
-                'dy': annot.bbox.y - original_bbox.y,
-                'dw': annot.bbox.w - original_bbox.w,
-                'dh': annot.bbox.h - original_bbox.h
+                'dx': current_bbox.x - original_bbox.x,
+                'dy': current_bbox.y - original_bbox.y,
+                'dw': current_bbox.w - original_bbox.w,
+                'dh': current_bbox.h - original_bbox.h
             }
 
             # Check for near-identical bboxes BEFORE IoU calculation.
@@ -453,26 +458,24 @@ def compute_diff(
             dh = abs(bbox_shift['dh'])
 
             if dx < 1.0 and dy < 1.0 and dw < 1.0 and dh < 1.0:
-                # Coordinates are essentially identical - treat as matched
+                # Coordinates are essentially identical - user didn't edit in Bluebeam
                 change_type = ChangeType.MATCHED
                 iou = 1.0  # Perfect match by coordinate comparison
             else:
-                # Calculate IoU between database bbox and imported annotation bbox
-                iou = annot.bbox.iou(original_bbox)
+                # Calculate IoU between original and current bbox
+                iou = current_bbox.iou(original_bbox)
 
                 # Determine if this is a match or modification based on IoU
                 if iou >= modification_threshold:
                     change_type = ChangeType.MATCHED
                 else:
                     change_type = ChangeType.MODIFIED
-                    # DEBUG: Log IoU comparison for MODIFIED detections
+                    # DEBUG: Log comparison for MODIFIED detections
                     print(f"[Bluebeam Import DEBUG] MODIFIED detection {det_id[:8]}...", flush=True)
-                    print(f"  NM bbox (from PDF annotation):", flush=True)
-                    print(f"    center: ({annot.bbox.x:.1f}, {annot.bbox.y:.1f}), size: {annot.bbox.w:.1f}x{annot.bbox.h:.1f}", flush=True)
-                    print(f"    corners: ({annot.bbox.x - annot.bbox.w/2:.1f}, {annot.bbox.y - annot.bbox.h/2:.1f}) to ({annot.bbox.x + annot.bbox.w/2:.1f}, {annot.bbox.y + annot.bbox.h/2:.1f})", flush=True)
-                    print(f"  DB bbox (from database):", flush=True)
+                    print(f"  Original (from NM metadata at export):", flush=True)
                     print(f"    center: ({original_bbox.x:.1f}, {original_bbox.y:.1f}), size: {original_bbox.w:.1f}x{original_bbox.h:.1f}", flush=True)
-                    print(f"    corners: ({original_bbox.x - original_bbox.w/2:.1f}, {original_bbox.y - original_bbox.h/2:.1f}) to ({original_bbox.x + original_bbox.w/2:.1f}, {original_bbox.y + original_bbox.h/2:.1f})", flush=True)
+                    print(f"  Current (from PDF rect after Bluebeam edit):", flush=True)
+                    print(f"    center: ({current_bbox.x:.1f}, {current_bbox.y:.1f}), size: {current_bbox.w:.1f}x{current_bbox.h:.1f}", flush=True)
                     print(f"  Shift: dx={bbox_shift['dx']:.1f}, dy={bbox_shift['dy']:.1f}, dw={bbox_shift['dw']:.1f}, dh={bbox_shift['dh']:.1f}", flush=True)
                     print(f"  IoU: {iou:.4f} (threshold: {modification_threshold})", flush=True)
 
@@ -483,7 +486,7 @@ def compute_diff(
                 page_number=annot.page_number,
                 detection_class=det.get('class'),
                 original_bbox=original_bbox.to_dict(),
-                imported_bbox=annot.bbox.to_dict(),
+                imported_bbox=current_bbox.to_dict(),  # Use current_bbox as the new position to apply
                 bbox_shift=bbox_shift,
                 iou=round(iou, 4),
                 annotation_subject=annot.subject,
@@ -503,7 +506,7 @@ def compute_diff(
                 page_number=annot.page_number,
                 detection_class=annot.subject.lower().replace(' ', '_') if annot.subject else 'unknown',
                 original_bbox=None,
-                imported_bbox=annot.bbox.to_dict(),
+                imported_bbox=annot.current_bbox.to_dict(),  # Use current_bbox
                 bbox_shift=None,
                 iou=None,
                 annotation_subject=annot.subject,
