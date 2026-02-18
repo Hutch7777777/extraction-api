@@ -306,13 +306,13 @@ def fetch_page_dimensions(job_id: str) -> Dict[int, Tuple[int, int]]:
     # Debug: show available fields from first page
     if pages and len(pages) > 0:
         print(f"[Bluebeam Import] First page keys: {list(pages[0].keys())}", flush=True)
-        print(f"[Bluebeam Import] First page values: image_width={pages[0].get('image_width')}, image_height={pages[0].get('image_height')}, width={pages[0].get('width')}, height={pages[0].get('height')}, pdf_width={pages[0].get('pdf_width')}, pdf_height={pages[0].get('pdf_height')}", flush=True)
+        print(f"[Bluebeam Import] First page values: original_width={pages[0].get('original_width')}, original_height={pages[0].get('original_height')}, image_width={pages[0].get('image_width')}, image_height={pages[0].get('image_height')}, width={pages[0].get('width')}, height={pages[0].get('height')}", flush=True)
 
     result = {}
     for page in pages:
         page_num = page.get('page_number', 0)
-        width = page.get('image_width') or page.get('width') or 0
-        height = page.get('image_height') or page.get('height') or 0
+        width = page.get('original_width') or page.get('image_width') or page.get('width') or 0
+        height = page.get('original_height') or page.get('image_height') or page.get('height') or 0
         if page_num and width and height:
             result[page_num] = (width, height)
 
