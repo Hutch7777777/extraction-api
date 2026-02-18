@@ -201,12 +201,12 @@ def extract_annotations_from_pdf(
 
         # Get image dimensions for coordinate conversion
         img_dims = page_dimensions.get(page_number)
-        if img_dims:
+        if img_dims and img_dims != (1, 1):
             img_width, img_height = img_dims
             scale_x = img_width / pdf_rect.width if pdf_rect.width > 0 else 1.0
             scale_y = img_height / pdf_rect.height if pdf_rect.height > 0 else 1.0
         else:
-            # Fallback: assume 1:1 mapping
+            # Fallback: assume 1:1 mapping (will use NM metadata bbox if available)
             scale_x = 1.0
             scale_y = 1.0
 
@@ -222,32 +222,60 @@ def extract_annotations_from_pdf(
             # Get annotation rect
             rect = annot.rect
 
-            # Convert PDF coordinates to pixel coordinates (center-based)
-            pdf_x1, pdf_y1 = rect.x0, rect.y0
-            pdf_x2, pdf_y2 = rect.x1, rect.y1
-
-            # Scale to image pixels
-            px_x1 = pdf_x1 * scale_x
-            px_y1 = pdf_y1 * scale_y
-            px_x2 = pdf_x2 * scale_x
-            px_y2 = pdf_y2 * scale_y
-
-            # Convert to center-based bbox
-            bbox = BoundingBox(
-                x=(px_x1 + px_x2) / 2,
-                y=(px_y1 + px_y2) / 2,
-                w=px_x2 - px_x1,
-                h=px_y2 - px_y1
-            )
-
             # Get annotation metadata
             info = annot.info
             subject = info.get('subject', '')
             contents = info.get('content', '')
-            nm_field = info.get('name', '')
+
+            # Read NM field using xref_get_key (annot.info doesn't work for NM set via xref_set_key)
+            nm_field = ''
+            try:
+                nm_result = doc.xref_get_key(annot.xref, 'NM')
+                if nm_result and len(nm_result) >= 2:
+                    # Result is tuple like ('string', '(EST:{...json...})')
+                    nm_raw = nm_result[1]
+                    # Remove parentheses if present (PDF string format)
+                    if nm_raw.startswith('(') and nm_raw.endswith(')'):
+                        nm_field = nm_raw[1:-1]
+                    else:
+                        nm_field = nm_raw
+                    print(f"[Bluebeam Import] Found NM field: {nm_field[:80]}...", flush=True)
+            except Exception as e:
+                print(f"[Bluebeam Import] Error reading NM field: {e}", flush=True)
 
             # Parse round-trip metadata from NM field
             roundtrip_metadata = parse_roundtrip_metadata(nm_field)
+
+            # Determine bbox: prefer embedded pixel coords from NM metadata
+            if roundtrip_metadata and 'bbox' in roundtrip_metadata:
+                # Use the original pixel coordinates stored during export
+                # This avoids coordinate conversion errors when image dimensions are unknown
+                stored_bbox = roundtrip_metadata['bbox']
+                bbox = BoundingBox(
+                    x=float(stored_bbox.get('x', 0)),
+                    y=float(stored_bbox.get('y', 0)),
+                    w=float(stored_bbox.get('w', 0)),
+                    h=float(stored_bbox.get('h', 0))
+                )
+                print(f"[Bluebeam Import] Using stored bbox from NM: {bbox.x:.1f},{bbox.y:.1f} {bbox.w:.1f}x{bbox.h:.1f}", flush=True)
+            else:
+                # No NM metadata - convert PDF coordinates to pixel coordinates
+                pdf_x1, pdf_y1 = rect.x0, rect.y0
+                pdf_x2, pdf_y2 = rect.x1, rect.y1
+
+                # Scale to image pixels
+                px_x1 = pdf_x1 * scale_x
+                px_y1 = pdf_y1 * scale_y
+                px_x2 = pdf_x2 * scale_x
+                px_y2 = pdf_y2 * scale_y
+
+                # Convert to center-based bbox
+                bbox = BoundingBox(
+                    x=(px_x1 + px_x2) / 2,
+                    y=(px_y1 + px_y2) / 2,
+                    w=px_x2 - px_x1,
+                    h=px_y2 - px_y1
+                )
 
             annotations.append(ImportedAnnotation(
                 page_number=page_number,
