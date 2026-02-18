@@ -271,16 +271,14 @@ def fetch_current_detections(job_id: str) -> Dict[str, Dict]:
     """
     detections = supabase_request('GET', 'extraction_detections_draft', filters={
         'job_id': f'eq.{job_id}',
-        'status': 'neq.deleted',
-        'select': 'id,page_id,class,pixel_x,pixel_y,pixel_width,pixel_height,status,detection_index'
+        'status': 'neq.deleted'
     })
 
     if not detections:
         # Try the view instead
         detections = supabase_request('GET', 'extraction_detection_details', filters={
             'job_id': f'eq.{job_id}',
-            'status': 'neq.deleted',
-            'select': 'id,page_id,class,pixel_x,pixel_y,pixel_width,pixel_height,status,detection_index'
+            'status': 'neq.deleted'
         })
 
     if not detections:
@@ -298,8 +296,9 @@ def fetch_page_dimensions(job_id: str) -> Dict[int, Tuple[int, int]]:
     """
     pages = supabase_request('GET', 'extraction_pages', filters={
         'job_id': f'eq.{job_id}',
-        'select': 'page_number,image_width,image_height,width,height'
+        'order': 'page_number.asc'
     })
+    print(f"[Bluebeam Import] Pages query returned: {len(pages) if pages else 0} pages", flush=True)
 
     if not pages:
         return {}
@@ -324,7 +323,7 @@ def fetch_page_id_mapping(job_id: str) -> Dict[int, str]:
     """
     pages = supabase_request('GET', 'extraction_pages', filters={
         'job_id': f'eq.{job_id}',
-        'select': 'id,page_number'
+        'order': 'page_number.asc'
     })
 
     if not pages:
