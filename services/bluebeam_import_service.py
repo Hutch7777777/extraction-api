@@ -457,7 +457,7 @@ def compute_diff(
             dw = abs(bbox_shift['dw'])
             dh = abs(bbox_shift['dh'])
 
-            if dx < 1.0 and dy < 1.0 and dw < 1.0 and dh < 1.0:
+            if dx < 1.0 and dy < 1.0 and dw < 15.0 and dh < 15.0:
                 # Coordinates are essentially identical - user didn't edit in Bluebeam
                 change_type = ChangeType.MATCHED
                 iou = 1.0  # Perfect match by coordinate comparison
