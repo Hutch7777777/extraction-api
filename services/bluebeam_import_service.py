@@ -436,10 +436,7 @@ def compute_diff(
                 h=float(det.get('pixel_height', 0))
             )
 
-            # Calculate IoU between database bbox and imported annotation bbox
-            iou = annot.bbox.iou(original_bbox)
-
-            # Calculate shift
+            # Calculate shift between NM bbox and DB bbox
             bbox_shift = {
                 'dx': annot.bbox.x - original_bbox.x,
                 'dy': annot.bbox.y - original_bbox.y,
@@ -447,21 +444,37 @@ def compute_diff(
                 'dh': annot.bbox.h - original_bbox.h
             }
 
-            # Determine if this is a match or modification based on IoU
-            if iou >= modification_threshold:
+            # Check for near-identical bboxes BEFORE IoU calculation.
+            # This handles zero-area detections (points, lines) where IoU is always 0
+            # even when coordinates are identical. Corbels, belly bands, etc.
+            dx = abs(bbox_shift['dx'])
+            dy = abs(bbox_shift['dy'])
+            dw = abs(bbox_shift['dw'])
+            dh = abs(bbox_shift['dh'])
+
+            if dx < 1.0 and dy < 1.0 and dw < 1.0 and dh < 1.0:
+                # Coordinates are essentially identical - treat as matched
                 change_type = ChangeType.MATCHED
+                iou = 1.0  # Perfect match by coordinate comparison
             else:
-                change_type = ChangeType.MODIFIED
-                # DEBUG: Log IoU comparison for MODIFIED detections
-                print(f"[Bluebeam Import DEBUG] MODIFIED detection {det_id[:8]}...", flush=True)
-                print(f"  NM bbox (from PDF annotation):", flush=True)
-                print(f"    center: ({annot.bbox.x:.1f}, {annot.bbox.y:.1f}), size: {annot.bbox.w:.1f}x{annot.bbox.h:.1f}", flush=True)
-                print(f"    corners: ({annot.bbox.x - annot.bbox.w/2:.1f}, {annot.bbox.y - annot.bbox.h/2:.1f}) to ({annot.bbox.x + annot.bbox.w/2:.1f}, {annot.bbox.y + annot.bbox.h/2:.1f})", flush=True)
-                print(f"  DB bbox (from database):", flush=True)
-                print(f"    center: ({original_bbox.x:.1f}, {original_bbox.y:.1f}), size: {original_bbox.w:.1f}x{original_bbox.h:.1f}", flush=True)
-                print(f"    corners: ({original_bbox.x - original_bbox.w/2:.1f}, {original_bbox.y - original_bbox.h/2:.1f}) to ({original_bbox.x + original_bbox.w/2:.1f}, {original_bbox.y + original_bbox.h/2:.1f})", flush=True)
-                print(f"  Shift: dx={bbox_shift['dx']:.1f}, dy={bbox_shift['dy']:.1f}, dw={bbox_shift['dw']:.1f}, dh={bbox_shift['dh']:.1f}", flush=True)
-                print(f"  IoU: {iou:.4f} (threshold: {modification_threshold})", flush=True)
+                # Calculate IoU between database bbox and imported annotation bbox
+                iou = annot.bbox.iou(original_bbox)
+
+                # Determine if this is a match or modification based on IoU
+                if iou >= modification_threshold:
+                    change_type = ChangeType.MATCHED
+                else:
+                    change_type = ChangeType.MODIFIED
+                    # DEBUG: Log IoU comparison for MODIFIED detections
+                    print(f"[Bluebeam Import DEBUG] MODIFIED detection {det_id[:8]}...", flush=True)
+                    print(f"  NM bbox (from PDF annotation):", flush=True)
+                    print(f"    center: ({annot.bbox.x:.1f}, {annot.bbox.y:.1f}), size: {annot.bbox.w:.1f}x{annot.bbox.h:.1f}", flush=True)
+                    print(f"    corners: ({annot.bbox.x - annot.bbox.w/2:.1f}, {annot.bbox.y - annot.bbox.h/2:.1f}) to ({annot.bbox.x + annot.bbox.w/2:.1f}, {annot.bbox.y + annot.bbox.h/2:.1f})", flush=True)
+                    print(f"  DB bbox (from database):", flush=True)
+                    print(f"    center: ({original_bbox.x:.1f}, {original_bbox.y:.1f}), size: {original_bbox.w:.1f}x{original_bbox.h:.1f}", flush=True)
+                    print(f"    corners: ({original_bbox.x - original_bbox.w/2:.1f}, {original_bbox.y - original_bbox.h/2:.1f}) to ({original_bbox.x + original_bbox.w/2:.1f}, {original_bbox.y + original_bbox.h/2:.1f})", flush=True)
+                    print(f"  Shift: dx={bbox_shift['dx']:.1f}, dy={bbox_shift['dy']:.1f}, dw={bbox_shift['dw']:.1f}, dh={bbox_shift['dh']:.1f}", flush=True)
+                    print(f"  IoU: {iou:.4f} (threshold: {modification_threshold})", flush=True)
 
             changes.append(ChangeRecord(
                 change_type=change_type,
