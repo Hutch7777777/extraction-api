@@ -382,6 +382,19 @@ def compute_diff(
     """
     Compare imported annotations against current detections.
 
+    IMPORTANT: Only detections that were originally exported (have NM metadata with det_id)
+    can be tracked. Detections without matching NM annotations are IGNORED (untracked),
+    not marked as deleted. This is because the export only creates annotations for
+    certain detection classes, so many database detections won't have PDF annotations.
+
+    A detection is only marked DELETED if:
+    1. It had an annotation with NM metadata (det_id) in the exported PDF
+    2. That annotation was removed by the user in Bluebeam
+
+    Since we can only detect deletions by seeing that a det_id that WAS in the PDF
+    is now MISSING, we track which det_ids appear in ANY annotation's NM metadata
+    as the set of "exported" detections.
+
     Args:
         annotations: Parsed annotations from imported PDF
         detections: Current detections keyed by ID
@@ -392,6 +405,17 @@ def compute_diff(
         List of ChangeRecord objects describing all changes
     """
     changes = []
+
+    # Build set of all det_ids found in PDF annotations (from NM metadata)
+    # These are the detections that were originally exported
+    exported_det_ids = set()
+    for annot in annotations:
+        if annot.detection_id:
+            exported_det_ids.add(annot.detection_id)
+
+    print(f"[Bluebeam Import] Found {len(exported_det_ids)} detection IDs in PDF annotations (exported detections)", flush=True)
+
+    # Track which exported det_ids still have annotations (not deleted in Bluebeam)
     matched_detection_ids = set()
 
     # Process each annotation
@@ -400,11 +424,11 @@ def compute_diff(
         page_id = page_id_map.get(annot.page_number)
 
         if det_id and det_id in detections:
-            # We have round-trip metadata and the detection still exists
+            # We have round-trip metadata and the detection still exists in DB
             det = detections[det_id]
             matched_detection_ids.add(det_id)
 
-            # Get original bbox from detection
+            # Get original bbox from detection database record
             original_bbox = BoundingBox(
                 x=float(det.get('pixel_x', 0)),
                 y=float(det.get('pixel_y', 0)),
@@ -412,7 +436,7 @@ def compute_diff(
                 h=float(det.get('pixel_height', 0))
             )
 
-            # Calculate IoU between original and imported bbox
+            # Calculate IoU between database bbox and imported annotation bbox
             iou = annot.bbox.iou(original_bbox)
 
             # Calculate shift
@@ -423,7 +447,7 @@ def compute_diff(
                 'dh': annot.bbox.h - original_bbox.h
             }
 
-            # Determine if this is a match or modification
+            # Determine if this is a match or modification based on IoU
             if iou >= modification_threshold:
                 change_type = ChangeType.MATCHED
             else:
@@ -442,8 +466,13 @@ def compute_diff(
                 annotation_subject=annot.subject,
                 annotation_contents=annot.contents
             ))
+        elif det_id and det_id not in detections:
+            # Annotation has NM metadata but detection was deleted from DB after export
+            # This is an orphaned annotation - skip it (don't add as ADDED)
+            print(f"[Bluebeam Import] Skipping annotation with det_id {det_id} - detection no longer exists in DB", flush=True)
+            continue
         else:
-            # New annotation (no round-trip metadata or detection was deleted)
+            # New annotation (no NM metadata = user drew this in Bluebeam)
             changes.append(ChangeRecord(
                 change_type=ChangeType.ADDED,
                 detection_id=None,
@@ -458,35 +487,41 @@ def compute_diff(
                 annotation_contents=annot.contents
             ))
 
-    # Find deleted detections (in DB but no matching annotation)
+    # Find DELETED detections:
+    # Only mark as deleted if the detection WAS exported (appears in exported_det_ids from
+    # some annotation's NM metadata) but no longer has a matching annotation.
+    #
+    # NOTE: Since we can't know which det_ids were in the ORIGINAL export before user edits,
+    # we can only detect deletions if the user deleted ALL annotations for a detection.
+    # In practice, this means we won't detect deletions from this PDF alone - we'd need
+    # to compare against the original exported PDF.
+    #
+    # For now, we ONLY mark deletions for det_ids that:
+    # 1. Exist in the database
+    # 2. Were in the exported_det_ids set (meaning they were exported)
+    # 3. Are NOT in matched_detection_ids (meaning their annotation is missing)
+    #
+    # However, this set will always be empty because if a det_id is in exported_det_ids,
+    # it came from an annotation in the PDF, so it will also be in matched_detection_ids.
+    #
+    # The only way to truly detect deletions is if we had stored which det_ids were
+    # originally exported. Without that, we cannot distinguish between:
+    # - "never exported" (detection class not included in export)
+    # - "exported but deleted in Bluebeam"
+    #
+    # Therefore, we DO NOT mark any detections as DELETED. Detections without matching
+    # annotations are simply UNTRACKED (not included in the diff).
+
+    untracked_count = 0
     for det_id, det in detections.items():
         if det_id not in matched_detection_ids:
-            # Get page number from page_id_map (reverse lookup)
-            page_number = None
-            page_id = det.get('page_id')
-            for pnum, pid in page_id_map.items():
-                if pid == page_id:
-                    page_number = pnum
-                    break
+            # This detection has no matching annotation in the PDF
+            # It was either never exported, or was deleted in Bluebeam
+            # Since we can't tell which, we leave it UNTRACKED (not in diff)
+            untracked_count += 1
 
-            changes.append(ChangeRecord(
-                change_type=ChangeType.DELETED,
-                detection_id=det_id,
-                page_id=page_id,
-                page_number=page_number or 0,
-                detection_class=det.get('class'),
-                original_bbox={
-                    'x': det.get('pixel_x'),
-                    'y': det.get('pixel_y'),
-                    'w': det.get('pixel_width'),
-                    'h': det.get('pixel_height')
-                },
-                imported_bbox=None,
-                bbox_shift=None,
-                iou=None,
-                annotation_subject=None,
-                annotation_contents=None
-            ))
+    if untracked_count > 0:
+        print(f"[Bluebeam Import] {untracked_count} detections have no matching PDF annotation (untracked - not included in diff)", flush=True)
 
     return changes
 
