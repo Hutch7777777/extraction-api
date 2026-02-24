@@ -403,8 +403,8 @@ def import_bluebeam_pdf(
             print(f"[Bluebeam Import] Warning: No page data for page {page_number}", flush=True)
             continue
 
-        image_width = page_data.get('image_width') or page_data.get('width')
-        image_height = page_data.get('image_height') or page_data.get('height')
+        image_width = page_data.get('original_width') or page_data.get('image_width') or page_data.get('width')
+        image_height = page_data.get('original_height') or page_data.get('image_height') or page_data.get('height')
 
         if not image_width or not image_height:
             print(f"[Bluebeam Import] Warning: No dimensions for page {page_number}", flush=True)
