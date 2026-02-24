@@ -478,7 +478,7 @@ def import_bluebeam_pdf(
         image_height = page_data.get('original_height') or page_data.get('image_height') or page_data.get('height')
 
         if not image_width or not image_height:
-            print(f"[Bluebeam Import] Warning: No dimensions for page {page_number}", flush=True)
+            print(f"[Bluebeam Import] Warning: No dimensions for page {db_page_number or pdf_page_number}", flush=True)
             continue
 
         # Transform PDF coords to pixel coords
@@ -593,7 +593,7 @@ def import_bluebeam_pdf(
                 'action': 'added',
                 'class': detected_class,
                 'page_id': page_data['id'],
-                'page_number': page_number,
+                'page_number': db_page_number,
                 'coords': new_coords,
                 'notes': annot.get('contents'),
                 'annot_type': annot.get('annot_type')
