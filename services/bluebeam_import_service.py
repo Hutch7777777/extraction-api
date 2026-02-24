@@ -40,6 +40,10 @@ from database import (
 COORDINATE_TOLERANCE_PX = 10.0  # Absolute pixel tolerance
 COORDINATE_TOLERANCE_PCT = 0.03  # 3% relative tolerance for dimensions
 
+# Border inflation: PDF annotations include stroke in their rect
+# A 52x105 detection becomes ~62x115 in the PDF (+5px per side)
+ANNOTATION_BORDER_PX = 5.0  # Estimated border/stroke width per side
+
 # Class name normalization mapping (Bluebeam Subject → our class names)
 CLASS_NAME_MAPPING = {
     'building': 'building',
@@ -199,11 +203,38 @@ def transform_pdf_to_pixel(
     }
 
 
+def compensate_border_inflation(
+    coords: Dict[str, float],
+    border_px: float = ANNOTATION_BORDER_PX
+) -> Dict[str, float]:
+    """
+    Compensate for PDF annotation border/stroke inflation.
+
+    PDF annotations include the stroke width in their rect, making them
+    larger than the original detection. Subtract the border to get the
+    actual content area.
+
+    Args:
+        coords: Imported coordinates with border inflation
+        border_px: Border width per side (default 5px)
+
+    Returns:
+        Adjusted coordinates with border subtracted
+    """
+    return {
+        'pixel_x': coords.get('pixel_x', 0),  # Center-based, no adjustment needed
+        'pixel_y': coords.get('pixel_y', 0),  # Center-based, no adjustment needed
+        'pixel_width': max(0, coords.get('pixel_width', 0) - (border_px * 2)),
+        'pixel_height': max(0, coords.get('pixel_height', 0) - (border_px * 2))
+    }
+
+
 def coords_within_tolerance(
     original: Dict[str, float],
     imported: Dict[str, float],
     abs_tolerance: float = COORDINATE_TOLERANCE_PX,
-    pct_tolerance: float = COORDINATE_TOLERANCE_PCT
+    pct_tolerance: float = COORDINATE_TOLERANCE_PCT,
+    is_point_marker: bool = False
 ) -> bool:
     """
     Check if two coordinate sets are within tolerance.
@@ -218,11 +249,19 @@ def coords_within_tolerance(
         imported: Imported annotation coordinates
         abs_tolerance: Absolute pixel tolerance
         pct_tolerance: Percentage tolerance (0.03 = 3%)
+        is_point_marker: If True, only compare position, ignore dimensions
 
     Returns:
         True if coordinates are effectively unchanged
     """
-    for key in ['pixel_x', 'pixel_y', 'pixel_width', 'pixel_height']:
+    # For point markers (width=0 or height=0), only compare position
+    # These get exported as small rectangles but their "size" is meaningless
+    if is_point_marker:
+        keys_to_check = ['pixel_x', 'pixel_y']
+    else:
+        keys_to_check = ['pixel_x', 'pixel_y', 'pixel_width', 'pixel_height']
+
+    for key in keys_to_check:
         orig_val = float(original.get(key, 0) or 0)
         imp_val = float(imported.get(key, 0) or 0)
         diff = abs(orig_val - imp_val)
@@ -472,14 +511,36 @@ def import_bluebeam_pdf(
                 continue
 
             # Check for geometry changes
-            original_coords = {
-                'pixel_x': original.get('pixel_x', 0),
-                'pixel_y': original.get('pixel_y', 0),
-                'pixel_width': original.get('pixel_width', 0),
-                'pixel_height': original.get('pixel_height', 0)
-            }
+            # Use roundtrip bbox if available (exact original coords from export)
+            # This avoids precision issues from coordinate transformations
+            rt_bbox = roundtrip.get('bbox', {})
+            if rt_bbox and rt_bbox.get('x') is not None:
+                original_coords = {
+                    'pixel_x': float(rt_bbox.get('x', 0) or 0),
+                    'pixel_y': float(rt_bbox.get('y', 0) or 0),
+                    'pixel_width': float(rt_bbox.get('w', 0) or 0),
+                    'pixel_height': float(rt_bbox.get('h', 0) or 0)
+                }
+            else:
+                original_coords = {
+                    'pixel_x': float(original.get('pixel_x', 0) or 0),
+                    'pixel_y': float(original.get('pixel_y', 0) or 0),
+                    'pixel_width': float(original.get('pixel_width', 0) or 0),
+                    'pixel_height': float(original.get('pixel_height', 0) or 0)
+                }
 
-            geometry_changed = not coords_within_tolerance(original_coords, new_coords)
+            # Detect point markers (original width=0 or height=0)
+            # These are brackets, corbels, etc. - only compare position
+            is_point_marker = original_coords['pixel_width'] == 0 or original_coords['pixel_height'] == 0
+
+            # Compensate for PDF annotation border inflation before comparison
+            adjusted_coords = compensate_border_inflation(new_coords)
+
+            geometry_changed = not coords_within_tolerance(
+                original_coords,
+                adjusted_coords,
+                is_point_marker=is_point_marker
+            )
 
             # Check for class change
             original_class = original.get('class', 'unknown').lower().replace(' ', '_')
