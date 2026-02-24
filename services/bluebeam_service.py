@@ -875,11 +875,28 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
                     )
 
                     # Step 4: Embed round-trip metadata in NM field
+                    # Use hex string encoding to avoid PDF string escaping issues
                     try:
-                        rt = json.dumps({"v":1,"det_id":det.get("id"),"page_id":det.get("page_id"),"job_id":det.get("job_id"),"class":cls,"bbox":{"x":det.get("pixel_x"),"y":det.get("pixel_y"),"w":det.get("pixel_width"),"h":det.get("pixel_height")}}, separators=(",",":"))
-                        pdf_doc.xref_set_key(annot.xref, "NM", f"(EST:{rt})")
+                        rt_data = {
+                            "v": 1,
+                            "det_id": str(det.get("id")) if det.get("id") else None,
+                            "page_id": str(page_id),  # Use loop variable, always available
+                            "job_id": str(job_id),    # Use function param, always available
+                            "class": cls,
+                            "bbox": {
+                                "x": det.get("pixel_x"),
+                                "y": det.get("pixel_y"),
+                                "w": det.get("pixel_width"),
+                                "h": det.get("pixel_height")
+                            }
+                        }
+                        rt_json = json.dumps(rt_data, separators=(",", ":"))
+                        # Use hex string format <...> to avoid escaping issues with parentheses
+                        nm_value = f"EST:{rt_json}"
+                        nm_hex = "<" + nm_value.encode().hex() + ">"
+                        pdf_doc.xref_set_key(annot.xref, "NM", nm_hex)
                     except Exception as e:
-                        print(f"[Bluebeam Export] NM field error: {e}", flush=True)
+                        print(f"[Bluebeam Export] NM field error for det {det.get('id')}: {e}", flush=True)
                     total_annotations += 1
 
                 # Build visual label text with measurement and material

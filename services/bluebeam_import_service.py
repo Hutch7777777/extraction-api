@@ -253,15 +253,18 @@ def extract_annotations_from_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
                     continue
 
                 # Get NM field for round-trip metadata
+                # xref_get_key is the reliable method - it auto-decodes hex strings
+                nm_field = None
                 try:
                     nm_raw = pdf_doc.xref_get_key(annot.xref, "NM")
-                    # nm_raw is a tuple like ('string', '(EST:{...})')
-                    nm_field = nm_raw[1] if nm_raw and len(nm_raw) > 1 else None
-                    # Strip parentheses from PDF string literal
-                    if nm_field and nm_field.startswith('(') and nm_field.endswith(')'):
-                        nm_field = nm_field[1:-1]
+                    # nm_raw is a tuple like ('string', 'EST:{...}') - PyMuPDF auto-decodes hex
+                    if nm_raw and len(nm_raw) > 1 and nm_raw[0] == 'string':
+                        nm_field = nm_raw[1]
+                        # Strip parentheses if present (literal string format)
+                        if nm_field.startswith('(') and nm_field.endswith(')'):
+                            nm_field = nm_field[1:-1]
                 except:
-                    nm_field = None
+                    pass
 
                 # Get Subject (class name)
                 try:
