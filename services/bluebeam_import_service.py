@@ -8,7 +8,7 @@ Key features:
 - Parses EST:{...} JSON from annotation NM (Name) field
 - Transforms PDF coordinates back to pixel coordinates
 - Runs 4-way diff: unchanged, modified, deleted, new
-- Updates extraction_detection_details with changes
+- Updates extraction_detections_draft with changes
 - Preserves history via soft deletes (is_deleted flag)
 """
 
@@ -361,7 +361,7 @@ def import_bluebeam_pdf(
     print(f"[Bluebeam Import] Found {len(pages)} pages", flush=True)
 
     # 3. Get all current detections for this job
-    current_detections = supabase_request('GET', 'extraction_detection_details', filters={
+    current_detections = supabase_request('GET', 'extraction_detections_draft', filters={
         'job_id': f'eq.{job_id}',
         'status': 'neq.deleted',
         'order': 'page_id,class,detection_index'
@@ -597,7 +597,7 @@ def _apply_changes_to_database(
                 page_data = page_id_lookup.get(page_id, {})
 
                 # Get next detection index for this page
-                existing = supabase_request('GET', 'extraction_detection_details', filters={
+                existing = supabase_request('GET', 'extraction_detections_draft', filters={
                     'page_id': f'eq.{page_id}',
                     'order': 'detection_index.desc',
                     'limit': '1'
@@ -631,7 +631,7 @@ def _apply_changes_to_database(
                     )
                     new_detection.update(real_dims)
 
-                result = supabase_request('POST', 'extraction_detection_details', new_detection)
+                result = supabase_request('POST', 'extraction_detections_draft', new_detection)
                 if result:
                     applied['added'] += 1
                     # Add the new ID to the change record for response
@@ -708,7 +708,7 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
     print(f"[Bluebeam Recalc] Aggregating detections for job {job_id}", flush=True)
 
     # 1. Get all active detections for this job
-    detections = supabase_request('GET', 'extraction_detection_details', filters={
+    detections = supabase_request('GET', 'extraction_detections_draft', filters={
         'job_id': f'eq.{job_id}',
         'status': 'neq.deleted'
     })
