@@ -5,6 +5,59 @@ Detection measurement calculations
 from config import config
 
 
+def calculate_real_dimensions(pixel_width, pixel_height, scale_ratio, dpi=None, is_triangle=False):
+    """
+    Calculate real-world dimensions for a single detection.
+
+    Args:
+        pixel_width: Detection width in pixels
+        pixel_height: Detection height in pixels
+        scale_ratio: Drawing scale ratio (e.g., 48 for 1/4" = 1')
+        dpi: Image DPI (defaults to config value)
+        is_triangle: If True, calculate area as triangle (for gables)
+
+    Returns:
+        Dict with real_width_in, real_height_in, real_width_ft, real_height_ft, area_sf, perimeter_lf
+    """
+    if dpi is None:
+        dpi = config.DEFAULT_DPI
+
+    if not scale_ratio or scale_ratio <= 0:
+        scale_ratio = 48  # Default 1/4" scale
+
+    inches_per_pixel = 1.0 / dpi
+    real_inches_per_pixel = inches_per_pixel * scale_ratio
+
+    # Calculate dimensions
+    real_width_in = pixel_width * real_inches_per_pixel
+    real_height_in = pixel_height * real_inches_per_pixel
+    real_width_ft = real_width_in / 12
+    real_height_ft = real_height_in / 12
+
+    # Calculate area (triangle for gables, rectangle otherwise)
+    if is_triangle:
+        area_sf = (real_width_ft * real_height_ft) / 2
+    else:
+        area_sf = real_width_ft * real_height_ft
+
+    # Calculate perimeter
+    if is_triangle:
+        # For triangles (gables): base + two sloped sides
+        hypotenuse = ((real_width_ft / 2) ** 2 + real_height_ft ** 2) ** 0.5
+        perimeter_lf = real_width_ft + (2 * hypotenuse)
+    else:
+        perimeter_lf = 2 * (real_width_ft + real_height_ft)
+
+    return {
+        'real_width_in': round(real_width_in, 2),
+        'real_height_in': round(real_height_in, 2),
+        'real_width_ft': round(real_width_ft, 2),
+        'real_height_ft': round(real_height_ft, 2),
+        'area_sf': round(area_sf, 2),
+        'perimeter_lf': round(perimeter_lf, 2)
+    }
+
+
 def calculate_real_measurements(predictions, scale_ratio, dpi=None):
     """
     Convert pixel-based predictions to real-world measurements.

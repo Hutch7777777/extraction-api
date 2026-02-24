@@ -41,7 +41,7 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.6",
+        "version": "4.8",
         "architecture": "modular",
         "features": [
             "markups",
@@ -52,7 +52,9 @@ def health():
             "dimension_sources",
             "roof_intelligence",
             "linear_elements",
-            "intelligent_analysis"  # NEW: Parallel page analysis with comprehensive extraction
+            "intelligent_analysis",
+            "bluebeam_export",
+            "bluebeam_import"  # v4.8: Round-trip import from edited Bluebeam PDFs
         ]
     })
 
@@ -1721,6 +1723,237 @@ def _calculate_exterior_bounds(building, roof):
         [x2, y2],  # bottom-right
         [x1, y2]   # bottom-left
     ]
+
+
+# ============================================================
+# BLUEBEAM EXPORT ENDPOINTS
+# ============================================================
+
+@app.route('/export-bluebeam', methods=['POST'])
+def export_bluebeam():
+    """
+    Export approved detections to Bluebeam-compatible PDF.
+
+    Creates a PDF with native annotations for each detection, including:
+    - Polygon/rect annotations for area detections (siding, windows, doors)
+    - Line annotations for linear detections (gutters, fascia, trim)
+    - Circle annotations for point detections (vents, corbels)
+
+    Each annotation includes:
+    - Pre-calculated measurements (area_sf, perimeter_lf)
+    - Trim measurements (head_trim_lf, jamb_trim_lf, sill_trim_lf)
+    - Assigned material info (manufacturer, product name)
+    - Matched tag reference (W-101, D-1, etc.)
+
+    Request body:
+        job_id: UUID of extraction job (required)
+        include_materials: bool (default: true) - include material names in annotations
+
+    Returns:
+        success: bool
+        download_url: str - public URL to download the annotated PDF
+        filename: str - generated filename
+        page_count: int - number of pages in PDF
+        detection_count: int - total detections annotated
+        export_type: 'validated' or 'draft'
+
+    Notes:
+        - Jobs must have status='approved' and stage='validated' for full export
+        - Non-approved jobs will receive a DRAFT watermark
+        - Uses validated detections table for pre-calculated measurements
+    """
+    from services.bluebeam_export_service import export_to_bluebeam
+
+    data = request.json or {}
+    job_id = data.get('job_id')
+
+    if not job_id:
+        return jsonify({'success': False, 'error': 'job_id required'}), 400
+
+    include_materials = data.get('include_materials', True)
+
+    result = export_to_bluebeam(
+        job_id=job_id,
+        include_materials=include_materials
+    )
+
+    if result.get('success'):
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
+
+
+@app.route('/export-bluebeam/preview', methods=['GET'])
+def export_bluebeam_preview():
+    """
+    Get preview info about what would be exported without creating PDF.
+
+    Query params:
+        job_id: UUID of extraction job (required)
+
+    Returns:
+        success: bool
+        job_id: str
+        project_name: str
+        is_approved: bool - whether job is approved for full export
+        export_type: 'validated' or 'draft'
+        page_count: int
+        detection_count: int
+        class_counts: dict - detection counts by class
+        total_area_sf: float
+        total_linear_lf: float
+        warning: str or null - warning message if not approved
+    """
+    from services.bluebeam_export_service import get_export_preview
+
+    job_id = request.args.get('job_id')
+
+    if not job_id:
+        return jsonify({'success': False, 'error': 'job_id required'}), 400
+
+    result = get_export_preview(job_id)
+
+    if result.get('success'):
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
+
+
+# ============================================================
+# BLUEBEAM IMPORT ENDPOINTS (Round-Trip Integration)
+# ============================================================
+
+@app.route('/import-bluebeam', methods=['POST'])
+def import_bluebeam():
+    """
+    Import edited Bluebeam PDF and sync changes back to detections.
+
+    This enables the full round-trip workflow:
+    1. Export detections to Bluebeam-compatible PDF (/export-bluebeam)
+    2. Contractor edits annotations in Bluebeam Revu
+    3. Import edited PDF back (/import-bluebeam) <- THIS ENDPOINT
+    4. System diffs changes and updates detections
+
+    Request:
+        Content-Type: multipart/form-data
+        Body:
+            - job_id: UUID of extraction job (form field)
+            - pdf_file: The edited PDF file (file upload)
+            - apply_changes: bool (default: true) - whether to apply changes to DB
+            - trigger_recalc: bool (default: false) - whether to trigger takeoff recalculation
+
+    Response:
+        success: bool
+        job_id: str
+        project_name: str
+        summary:
+            unchanged: int - detections that weren't modified
+            modified: int - detections with geometry or class changes
+            deleted: int - detections removed in Bluebeam
+            added: int - new annotations added by contractor
+            readded: int - previously deleted detections restored
+        changes: list - detailed change records:
+            - action: 'modified' | 'deleted' | 'added' | 'readded'
+            - detection_id: UUID (for existing detections)
+            - new_detection_id: UUID (for newly created detections)
+            - field: 'geometry' | 'class' | 'geometry,class'
+            - old_coords, new_coords: coordinate changes
+            - old_class, new_class: class changes
+            - old_sf, new_sf: area changes
+
+    Notes:
+        - Annotations must have been exported with /export-bluebeam to be matched
+        - New annotations from Bluebeam are inferred from Subject field or color
+        - Soft deletes preserve detection history (is_deleted=true)
+        - Coordinate tolerance of ±2px is used for "unchanged" comparison
+    """
+    from services.bluebeam_import_service import import_bluebeam_pdf
+
+    # Get job_id from form data
+    job_id = request.form.get('job_id')
+    if not job_id:
+        return jsonify({'success': False, 'error': 'job_id required'}), 400
+
+    # Get PDF file
+    pdf_file = request.files.get('pdf_file')
+    if not pdf_file:
+        return jsonify({'success': False, 'error': 'pdf_file required'}), 400
+
+    # Read PDF bytes
+    try:
+        pdf_bytes = pdf_file.read()
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Failed to read PDF file: {e}'}), 400
+
+    if len(pdf_bytes) == 0:
+        return jsonify({'success': False, 'error': 'PDF file is empty'}), 400
+
+    # Get options
+    apply_changes = request.form.get('apply_changes', 'true').lower() == 'true'
+    trigger_recalc = request.form.get('trigger_recalc', 'false').lower() == 'true'
+
+    print(f"[Import Bluebeam] Received PDF for job {job_id}, size: {len(pdf_bytes)} bytes", flush=True)
+
+    # Run import
+    result = import_bluebeam_pdf(job_id, pdf_bytes, apply_changes=apply_changes)
+
+    # Optionally trigger full recalculation pipeline via n8n webhook
+    if result.get('success') and trigger_recalc and apply_changes:
+        from services.bluebeam_import_service import trigger_recalculation_webhook
+
+        recalc_result = trigger_recalculation_webhook(job_id)
+        result['recalculation'] = recalc_result
+
+        if recalc_result.get('success'):
+            result['takeoff_recalculated'] = True
+        else:
+            result['takeoff_recalculated'] = False
+            result['takeoff_error'] = recalc_result.get('error', 'Unknown error')
+
+    if result.get('success'):
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
+
+
+@app.route('/import-bluebeam/preview', methods=['POST'])
+def import_bluebeam_preview():
+    """
+    Preview what changes would be imported without applying them.
+
+    Same as /import-bluebeam but with apply_changes=false.
+    Use this to show the user what will change before committing.
+
+    Request:
+        Content-Type: multipart/form-data
+        Body:
+            - job_id: UUID of extraction job (form field)
+            - pdf_file: The edited PDF file (file upload)
+
+    Response:
+        Same as /import-bluebeam but changes are not applied to database.
+    """
+    from services.bluebeam_import_service import get_import_preview
+
+    job_id = request.form.get('job_id')
+    if not job_id:
+        return jsonify({'success': False, 'error': 'job_id required'}), 400
+
+    pdf_file = request.files.get('pdf_file')
+    if not pdf_file:
+        return jsonify({'success': False, 'error': 'pdf_file required'}), 400
+
+    try:
+        pdf_bytes = pdf_file.read()
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Failed to read PDF file: {e}'}), 400
+
+    result = get_import_preview(job_id, pdf_bytes)
+
+    if result.get('success'):
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
 
 
 # ============================================================
