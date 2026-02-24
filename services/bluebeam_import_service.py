@@ -68,6 +68,10 @@ CLASS_NAME_MAPPING = {
     'brick': 'brick',
 }
 
+# Classes skipped during export (should not be marked as deleted on import)
+# Must match SKIP_CLASSES in bluebeam_service.py
+SKIP_CLASSES = {'building'}
+
 # Color-to-class fallback mapping (RGB 0-1 range)
 COLOR_CLASS_MAPPING = {
     (0, 0.47, 1): 'building',        # Blue
@@ -257,14 +261,18 @@ def extract_annotations_from_pdf(pdf_bytes: bytes) -> List[Dict[str, Any]]:
                 nm_field = None
                 try:
                     nm_raw = pdf_doc.xref_get_key(annot.xref, "NM")
+                    # Debug: log what we're reading
+                    if nm_raw:
+                        print(f"[Bluebeam Import] NM raw: type={nm_raw[0]}, value={str(nm_raw[1])[:80]}...", flush=True)
+
                     # nm_raw is a tuple like ('string', 'EST:{...}') - PyMuPDF auto-decodes hex
                     if nm_raw and len(nm_raw) > 1 and nm_raw[0] == 'string':
                         nm_field = nm_raw[1]
                         # Strip parentheses if present (literal string format)
                         if nm_field.startswith('(') and nm_field.endswith(')'):
                             nm_field = nm_field[1:-1]
-                except:
-                    pass
+                except Exception as e:
+                    print(f"[Bluebeam Import] Error reading NM: {e}", flush=True)
 
                 # Get Subject (class name)
                 try:
@@ -365,7 +373,8 @@ def import_bluebeam_pdf(
 
     # 4. Extract annotations from PDF
     annotations = extract_annotations_from_pdf(pdf_bytes)
-    print(f"[Bluebeam Import] Extracted {len(annotations)} annotations from PDF", flush=True)
+    with_roundtrip = sum(1 for a in annotations if a.get('roundtrip'))
+    print(f"[Bluebeam Import] Extracted {len(annotations)} annotations from PDF ({with_roundtrip} with roundtrip metadata)", flush=True)
 
     # 5. Run diff algorithm
     changes = []
@@ -477,8 +486,17 @@ def import_bluebeam_pdf(
             })
 
     # 6. Find deleted detections (in DB but not in returned PDF)
+    # Only mark as deleted if:
+    # - The detection was not seen in the imported PDF
+    # - The detection's page was in the PDF
+    # - The detection's class is NOT in SKIP_CLASSES (those were never exported)
     for det_id, detection in detection_lookup.items():
         if det_id not in seen_detection_ids:
+            det_class = (detection.get('class') or '').lower()
+            # Skip classes that were never exported
+            if det_class in SKIP_CLASSES:
+                continue
+
             # Check if this detection's page was in the PDF
             page_data = page_id_lookup.get(detection.get('page_id'))
             if page_data and page_data['page_number'] in page_lookup:
