@@ -1762,7 +1762,7 @@ def export_bluebeam():
         - Non-approved jobs will receive a DRAFT watermark
         - Uses validated detections table for pre-calculated measurements
     """
-    from services.bluebeam_export_service import export_to_bluebeam
+    from services.bluebeam_service import export_bluebeam_pdf
 
     data = request.json or {}
     job_id = data.get('job_id')
@@ -1772,7 +1772,7 @@ def export_bluebeam():
 
     include_materials = data.get('include_materials', True)
 
-    result = export_to_bluebeam(
+    result = export_bluebeam_pdf(
         job_id=job_id,
         include_materials=include_materials
     )
@@ -1804,19 +1804,56 @@ def export_bluebeam_preview():
         total_linear_lf: float
         warning: str or null - warning message if not approved
     """
-    from services.bluebeam_export_service import get_export_preview
+    from database import supabase_request
 
     job_id = request.args.get('job_id')
 
     if not job_id:
         return jsonify({'success': False, 'error': 'job_id required'}), 400
 
-    result = get_export_preview(job_id)
+    # Get job info
+    jobs = supabase_request('GET', 'extraction_jobs', filters={'id': f'eq.{job_id}'})
+    if not jobs:
+        return jsonify({'success': False, 'error': 'Job not found'}), 404
 
-    if result.get('success'):
-        return jsonify(result), 200
-    else:
-        return jsonify(result), 400
+    job = jobs[0]
+    is_approved = job.get('status') == 'approved' and job.get('stage') == 'validated'
+
+    # Get page count
+    pages = supabase_request('GET', 'extraction_pages', filters={'job_id': f'eq.{job_id}'})
+    page_count = len(pages) if pages else 0
+
+    # Get detection counts
+    detections = supabase_request('GET', 'extraction_detection_details', filters={
+        'job_id': f'eq.{job_id}',
+        'status': 'neq.deleted'
+    })
+
+    class_counts = {}
+    total_area_sf = 0.0
+    total_linear_lf = 0.0
+
+    for det in (detections or []):
+        cls = det.get('class', 'unknown')
+        class_counts[cls] = class_counts.get(cls, 0) + 1
+        total_area_sf += float(det.get('area_sf') or 0)
+        total_linear_lf += float(det.get('perimeter_lf') or 0)
+
+    result = {
+        'success': True,
+        'job_id': job_id,
+        'project_name': job.get('project_name', 'Untitled'),
+        'is_approved': is_approved,
+        'export_type': 'validated' if is_approved else 'draft',
+        'page_count': page_count,
+        'detection_count': len(detections or []),
+        'class_counts': class_counts,
+        'total_area_sf': round(total_area_sf, 2),
+        'total_linear_lf': round(total_linear_lf, 2),
+        'warning': None if is_approved else 'Job not approved - export will include DRAFT watermark'
+    }
+
+    return jsonify(result), 200
 
 
 # ============================================================
