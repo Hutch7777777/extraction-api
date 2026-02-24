@@ -34,8 +34,11 @@ from database import (
 )
 
 
-# Coordinate tolerance for "unchanged" detection (pixels)
-COORDINATE_TOLERANCE_PX = 2.0
+# Coordinate tolerance for "unchanged" detection
+# PDF coordinate round-trip loses precision: pixel → PDF points → pixel
+# Use generous tolerance to avoid false "modified" detections
+COORDINATE_TOLERANCE_PX = 10.0  # Absolute pixel tolerance
+COORDINATE_TOLERANCE_PCT = 0.03  # 3% relative tolerance for dimensions
 
 # Class name normalization mapping (Bluebeam Subject → our class names)
 CLASS_NAME_MAPPING = {
@@ -199,23 +202,37 @@ def transform_pdf_to_pixel(
 def coords_within_tolerance(
     original: Dict[str, float],
     imported: Dict[str, float],
-    tolerance: float = COORDINATE_TOLERANCE_PX
+    abs_tolerance: float = COORDINATE_TOLERANCE_PX,
+    pct_tolerance: float = COORDINATE_TOLERANCE_PCT
 ) -> bool:
     """
     Check if two coordinate sets are within tolerance.
 
+    Uses BOTH absolute (pixels) and percentage-based tolerance.
+    A coordinate is "unchanged" if it's within EITHER threshold.
+    This handles both small detections (where % is too tight) and
+    large detections (where absolute px is too tight).
+
     Args:
         original: Original detection coordinates
         imported: Imported annotation coordinates
-        tolerance: Pixel tolerance for "unchanged" comparison
+        abs_tolerance: Absolute pixel tolerance
+        pct_tolerance: Percentage tolerance (0.03 = 3%)
 
     Returns:
         True if coordinates are effectively unchanged
     """
     for key in ['pixel_x', 'pixel_y', 'pixel_width', 'pixel_height']:
-        orig_val = original.get(key, 0)
-        imp_val = imported.get(key, 0)
-        if abs(orig_val - imp_val) > tolerance:
+        orig_val = float(original.get(key, 0) or 0)
+        imp_val = float(imported.get(key, 0) or 0)
+        diff = abs(orig_val - imp_val)
+
+        # Calculate percentage-based threshold (use larger of the two values)
+        max_val = max(abs(orig_val), abs(imp_val), 1)  # Avoid div by zero
+        pct_threshold = max_val * pct_tolerance
+
+        # Pass if within EITHER absolute OR percentage tolerance
+        if diff > abs_tolerance and diff > pct_threshold:
             return False
     return True
 
@@ -392,10 +409,12 @@ def import_bluebeam_pdf(
     # 5. Run diff algorithm
     changes = []
     seen_detection_ids = set()
+    pages_with_annotations = set()  # Track which pages had annotations in the PDF
 
     for annot in annotations:
         roundtrip = annot.get('roundtrip')
         page_number = annot['page_number']
+        pages_with_annotations.add(page_number)  # This page was in the exported PDF
 
         # Get page data for coordinate transformation
         page_data = page_lookup.get(page_number)
@@ -509,8 +528,12 @@ def import_bluebeam_pdf(
     # 6. Find deleted detections (in DB but not in returned PDF)
     # Only mark as deleted if:
     # - The detection was not seen in the imported PDF
-    # - The detection's page was in the PDF
+    # - The detection's page actually had annotations in the exported PDF
+    #   (pages without annotations were not exported, so missing detections
+    #    on those pages should remain "unchanged", not "deleted")
     # - The detection's class is NOT in SKIP_CLASSES (those were never exported)
+    print(f"[Bluebeam Import] Pages with annotations in PDF: {sorted(pages_with_annotations)}", flush=True)
+
     for det_id, detection in detection_lookup.items():
         if det_id not in seen_detection_ids:
             det_class = (detection.get('class') or '').lower()
@@ -518,9 +541,10 @@ def import_bluebeam_pdf(
             if det_class in SKIP_CLASSES:
                 continue
 
-            # Check if this detection's page was in the PDF
+            # Check if this detection's page was actually in the exported PDF
+            # (had annotations - meaning it was included in the export)
             page_data = page_id_lookup.get(detection.get('page_id'))
-            if page_data and page_data['page_number'] in page_lookup:
+            if page_data and page_data['page_number'] in pages_with_annotations:
                 changes.append({
                     'action': 'deleted',
                     'detection_id': det_id,
