@@ -368,13 +368,26 @@ def import_bluebeam_pdf(
     })
 
     # Build detection lookup by ID
-    detection_lookup = {d['id']: d for d in (current_detections or [])}
+    # IMPORTANT: Ensure keys are strings for matching against JSON det_id
+    detection_lookup = {str(d['id']): d for d in (current_detections or [])}
     print(f"[Bluebeam Import] Found {len(detection_lookup)} current detections", flush=True)
+
+    # Debug: show sample DB IDs and their types
+    if current_detections:
+        sample_ids = [d.get('id') for d in current_detections[:3]]
+        print(f"[Bluebeam Import] Sample DB IDs: {sample_ids}", flush=True)
+        print(f"[Bluebeam Import] DB ID types: {[type(id).__name__ for id in sample_ids]}", flush=True)
+        print(f"[Bluebeam Import] DB fields available: {list(current_detections[0].keys())[:10]}", flush=True)
 
     # 4. Extract annotations from PDF
     annotations = extract_annotations_from_pdf(pdf_bytes)
     with_roundtrip = sum(1 for a in annotations if a.get('roundtrip'))
     print(f"[Bluebeam Import] Extracted {len(annotations)} annotations from PDF ({with_roundtrip} with roundtrip metadata)", flush=True)
+
+    # Debug: show sample annotation det_ids
+    sample_rt = [a.get('roundtrip', {}).get('det_id') for a in annotations if a.get('roundtrip')][:3]
+    print(f"[Bluebeam Import] Sample PDF det_ids: {sample_rt}", flush=True)
+    print(f"[Bluebeam Import] PDF det_id types: {[type(id).__name__ for id in sample_rt if id]}", flush=True)
 
     # 5. Run diff algorithm
     changes = []
@@ -415,10 +428,18 @@ def import_bluebeam_pdf(
 
         if roundtrip and roundtrip.get('det_id'):
             # This is one of our annotations - check for modifications
-            det_id = roundtrip['det_id']
+            det_id = str(roundtrip['det_id'])  # Ensure string for matching
             seen_detection_ids.add(det_id)
 
             original = detection_lookup.get(det_id)
+            # Debug first few lookups
+            if len(seen_detection_ids) <= 3:
+                print(f"[Bluebeam Import] Looking up det_id='{det_id}' (type={type(det_id).__name__}), found={original is not None}", flush=True)
+                if not original and detection_lookup:
+                    # Show what keys look like
+                    sample_key = list(detection_lookup.keys())[0]
+                    print(f"[Bluebeam Import] Sample lookup key: '{sample_key}' (type={type(sample_key).__name__})", flush=True)
+
             if not original:
                 # Detection was deleted from DB but still in PDF - treat as re-add
                 changes.append({
