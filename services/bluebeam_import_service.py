@@ -452,14 +452,27 @@ def import_bluebeam_pdf(
 
     for annot in annotations:
         roundtrip = annot.get('roundtrip')
-        page_number = annot['page_number']
-        pages_with_annotations.add(page_number)  # This page was in the exported PDF
+        pdf_page_number = annot['page_number']  # 0-indexed from PyMuPDF
 
         # Get page data for coordinate transformation
-        page_data = page_lookup.get(page_number)
+        # Use roundtrip page_id for accurate page matching (exact DB page ID)
+        page_data = None
+        if roundtrip and roundtrip.get('page_id'):
+            page_data = page_id_lookup.get(str(roundtrip['page_id']))
+
         if not page_data:
-            print(f"[Bluebeam Import] Warning: No page data for page {page_number}", flush=True)
+            # New annotation or missing roundtrip - try page_number
+            # PyMuPDF is 0-indexed, DB is 1-indexed, so try both
+            page_data = page_lookup.get(pdf_page_number) or page_lookup.get(pdf_page_number + 1)
+
+        if not page_data:
+            print(f"[Bluebeam Import] Warning: No page data for PDF page {pdf_page_number}", flush=True)
             continue
+
+        # Track DB page_number (1-indexed) for pages_with_annotations
+        db_page_number = page_data.get('page_number')
+        if db_page_number:
+            pages_with_annotations.add(db_page_number)
 
         image_width = page_data.get('original_width') or page_data.get('image_width') or page_data.get('width')
         image_height = page_data.get('original_height') or page_data.get('image_height') or page_data.get('height')
