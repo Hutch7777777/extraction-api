@@ -476,18 +476,7 @@ def import_bluebeam_pdf(
 
         image_width = page_data.get('original_width') or page_data.get('image_width') or page_data.get('width')
         image_height = page_data.get('original_height') or page_data.get('image_height') or page_data.get('height')
-
-        if not image_width or not image_height:
-            print(f"[Bluebeam Import] Warning: No dimensions for page {db_page_number or pdf_page_number}", flush=True)
-            continue
-
-        # Transform PDF coords to pixel coords
-        new_coords = transform_pdf_to_pixel(
-            annot['rect'],
-            annot['page_rect'],
-            image_width,
-            image_height
-        )
+        has_dimensions = bool(image_width and image_height)
 
         # Determine class name
         raw_class = annot.get('subject')
@@ -513,6 +502,16 @@ def import_bluebeam_pdf(
 
             if not original:
                 # Detection was deleted from DB but still in PDF - treat as re-add
+                # But we need dimensions to create the new coords
+                if not has_dimensions:
+                    print(f"[Bluebeam Import] Warning: Cannot re-add det {det_id} - no page dimensions", flush=True)
+                    continue
+                new_coords = transform_pdf_to_pixel(
+                    annot['rect'],
+                    annot['page_rect'],
+                    image_width,
+                    image_height
+                )
                 changes.append({
                     'action': 'readded',
                     'detection_id': det_id,
@@ -546,14 +545,30 @@ def import_bluebeam_pdf(
             # These are brackets, corbels, etc. - only compare position
             is_point_marker = original_coords['pixel_width'] == 0 or original_coords['pixel_height'] == 0
 
-            # Compensate for PDF annotation border inflation before comparison
-            adjusted_coords = compensate_border_inflation(new_coords)
+            # If we have page dimensions, transform PDF coords and compare
+            # If not, we can still use the roundtrip bbox for comparison
+            if has_dimensions:
+                new_coords = transform_pdf_to_pixel(
+                    annot['rect'],
+                    annot['page_rect'],
+                    image_width,
+                    image_height
+                )
+                # Compensate for PDF annotation border inflation before comparison
+                adjusted_coords = compensate_border_inflation(new_coords)
 
-            geometry_changed = not coords_within_tolerance(
-                original_coords,
-                adjusted_coords,
-                is_point_marker=is_point_marker
-            )
+                geometry_changed = not coords_within_tolerance(
+                    original_coords,
+                    adjusted_coords,
+                    is_point_marker=is_point_marker
+                )
+            else:
+                # No dimensions - can't transform PDF coords, but if we have roundtrip bbox
+                # we can still compare against original detection to see if class changed
+                # Assume geometry unchanged since we can't measure it
+                print(f"[Bluebeam Import] No dimensions for page {db_page_number or pdf_page_number}, assuming geometry unchanged for det {det_id}", flush=True)
+                geometry_changed = False
+                new_coords = original_coords  # Use original coords if no dimensions
 
             # Check for class change
             original_class = original.get('class', 'unknown').lower().replace(' ', '_')
@@ -589,6 +604,16 @@ def import_bluebeam_pdf(
 
         else:
             # New annotation added by contractor (no roundtrip metadata)
+            # Require dimensions to create new detection
+            if not has_dimensions:
+                print(f"[Bluebeam Import] Warning: Cannot add new annotation - no page dimensions for page {db_page_number or pdf_page_number}", flush=True)
+                continue
+            new_coords = transform_pdf_to_pixel(
+                annot['rect'],
+                annot['page_rect'],
+                image_width,
+                image_height
+            )
             changes.append({
                 'action': 'added',
                 'class': detected_class,
