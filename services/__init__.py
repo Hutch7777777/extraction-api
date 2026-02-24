@@ -41,6 +41,7 @@ from services.linear_service import (
     set_wall_height,
     get_wall_heights_from_ocr
 )
+from services.bluebeam_service import export_bluebeam_pdf
 
 __all__ = [
     # PDF
@@ -88,5 +89,8 @@ __all__ = [
     'get_linear_summary',
     'set_corner_counts',
     'set_wall_height',
-    'get_wall_heights_from_ocr'
+    'get_wall_heights_from_ocr',
+
+    # Bluebeam Export
+    'export_bluebeam_pdf'
 ]
