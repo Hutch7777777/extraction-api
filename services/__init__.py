@@ -42,39 +42,49 @@ from services.linear_service import (
     get_wall_heights_from_ocr
 )
 from services.bluebeam_service import export_bluebeam_pdf
+from services.bluebeam_export_service import (
+    export_to_bluebeam,
+    get_export_preview
+)
+from services.bluebeam_import_service import (
+    import_bluebeam_pdf,
+    get_import_preview,
+    aggregate_detections_for_recalc,
+    trigger_recalculation_webhook
+)
 
 __all__ = [
     # PDF
     'convert_pdf_background',
-    
+
     # Classification
     'classify_job_background',
-    
+
     # Extraction
     'process_job_background',
-    
+
     # Markup
     'generate_markup_image',
     'generate_markups_for_page',
     'generate_markups_for_job',
     'generate_comprehensive_markup',
-    
+
     # Takeoff
     'calculate_takeoff_for_page',
     'calculate_takeoff_for_job',
-    
+
     # Cross-reference
     'build_cross_references',
-    
+
     # Floor plan
     'analyze_floor_plan_for_job',
     'analyze_single_floor_plan',
-    
+
     # Fusion (Phase 2)
     'fuse_page_data',
     'fuse_job_data',
     'get_fusion_summary',
-    
+
     # Roof Intelligence (Phase 3)
     'process_roof_plan',
     'process_roof_plans_for_job',
@@ -83,7 +93,7 @@ __all__ = [
     'calculate_true_area',
     'calculate_soffit_area',
     'calculate_roofing_squares',
-    
+
     # Linear Elements (Phase 4)
     'calculate_linear_elements_for_job',
     'get_linear_summary',
@@ -92,5 +102,13 @@ __all__ = [
     'get_wall_heights_from_ocr',
 
     # Bluebeam Export
-    'export_bluebeam_pdf'
+    'export_bluebeam_pdf',
+    'export_to_bluebeam',
+    'get_export_preview',
+
+    # Bluebeam Import (Round-Trip)
+    'import_bluebeam_pdf',
+    'get_import_preview',
+    'aggregate_detections_for_recalc',
+    'trigger_recalculation_webhook'
 ]
