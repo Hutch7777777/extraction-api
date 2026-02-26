@@ -638,6 +638,15 @@ def import_bluebeam_fresh(
 
         # 6. Batch insert detections into extraction_detections_draft
         if all_detections:
+            # Normalize all detections to have consistent keys for PostgREST batch insert
+            all_keys = set()
+            for det in all_detections:
+                all_keys.update(det.keys())
+            for det in all_detections:
+                for key in all_keys:
+                    if key not in det:
+                        det[key] = None
+
             # Insert in batches of 50 to avoid timeouts
             batch_size = 50
             for i in range(0, len(all_detections), batch_size):
