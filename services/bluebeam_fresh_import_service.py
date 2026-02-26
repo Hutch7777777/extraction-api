@@ -568,8 +568,6 @@ def import_bluebeam_fresh(
             'source_pdf_url': None,  # No source PDF URL for fresh imports
         }
 
-        if organization_id:
-            job_data['organization_id'] = organization_id
 
         job = create_job(job_data)
 
