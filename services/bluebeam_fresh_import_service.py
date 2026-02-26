@@ -513,7 +513,7 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int) -> List
                 'confidence': 1.0,
                 'is_user_created': True,
                 'is_deleted': False,
-                'status': 'imported',
+                'status': 'complete',
             })
             detections.append(detection)
 
@@ -597,7 +597,7 @@ def import_bluebeam_fresh(
                 'original_width': page_img['width'],
                 'original_height': page_img['height'],
                 'page_type': 'elevation',  # Default; user can reclassify
-                'status': 'imported',
+                'status': 'complete',
                 'dpi': page_img.get('dpi', 150),
             }
 
