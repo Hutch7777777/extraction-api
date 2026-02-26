@@ -41,7 +41,7 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "version": "4.8",
+        "version": "4.9",
         "architecture": "modular",
         "features": [
             "markups",
@@ -54,7 +54,8 @@ def health():
             "linear_elements",
             "intelligent_analysis",
             "bluebeam_export",
-            "bluebeam_import"  # v4.8: Round-trip import from edited Bluebeam PDFs
+            "bluebeam_import",       # v4.8: Round-trip import from edited Bluebeam PDFs
+            "bluebeam_fresh_import"  # v4.9: Fresh import from annotated PDFs (no prior job)
         ]
     })
 
@@ -1991,6 +1992,98 @@ def import_bluebeam_preview():
         return jsonify(result), 200
     else:
         return jsonify(result), 400
+
+
+# ============================================================
+# BLUEBEAM FRESH IMPORT (No Prior Job Required)
+# ============================================================
+
+@app.route('/import-bluebeam-fresh', methods=['POST'])
+def import_bluebeam_fresh_endpoint():
+    """
+    Fresh Bluebeam import - creates new extraction job from annotated PDF.
+    No prior extraction job required.
+
+    This enables direct import of Bluebeam-annotated PDFs, bypassing the
+    AI detection pipeline entirely. Useful when contractors have already
+    done full takeoff markups in Bluebeam.
+
+    Request:
+        Content-Type: multipart/form-data
+        Body:
+            - pdf_file: The annotated PDF file (file upload, required)
+            - project_id: UUID of the project (form field, required)
+            - project_name: Display name for the project (form field, optional)
+            - organization_id: Organization UUID for multi-tenant (form field, optional)
+
+    Response:
+        success: bool
+        job_id: str - UUID of the created extraction job
+        total_pages: int - number of pages in the PDF
+        total_detections: int - total annotations parsed as detections
+        detection_summary: dict - counts and totals by class
+            {
+                "siding": {"count": 8, "total_sf": 2400.5, "total_lf": 0},
+                "window": {"count": 24, "total_sf": 186.0, "total_lf": 0},
+                ...
+            }
+        pages: list - annotation counts per page
+            [{"page_number": 1, "annotation_count": 12}, ...]
+        error: str (if failed)
+
+    Notes:
+        - Creates extraction_job with status='importing', then updates to 'classified'
+        - Converts PDF pages to images at 150 DPI
+        - Uploads images to Supabase Storage
+        - Parses polygons, polylines, rectangles, and count markers
+        - Infers class from annotation Subject field, color, or defaults
+        - User reviews in Detection Editor at /projects/[id]/extraction/[jobId]
+    """
+    from services.bluebeam_fresh_import_service import import_bluebeam_fresh
+
+    # Get form data
+    project_id = request.form.get('project_id')
+    project_name = request.form.get('project_name', '')
+    organization_id = request.form.get('organization_id', '')
+
+    if not project_id:
+        return jsonify({'success': False, 'error': 'project_id is required'}), 400
+
+    # Get PDF file
+    pdf_file = request.files.get('pdf_file')
+    if not pdf_file:
+        return jsonify({'success': False, 'error': 'pdf_file is required'}), 400
+
+    # Read PDF bytes
+    try:
+        pdf_bytes = pdf_file.read()
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Failed to read PDF file: {e}'}), 400
+
+    if len(pdf_bytes) == 0:
+        return jsonify({'success': False, 'error': 'PDF file is empty'}), 400
+
+    print(f"[Import Bluebeam Fresh] Received PDF for project {project_id}, size: {len(pdf_bytes)} bytes", flush=True)
+
+    # Run fresh import
+    try:
+        result = import_bluebeam_fresh(
+            pdf_bytes=pdf_bytes,
+            project_id=project_id,
+            project_name=project_name or None,
+            organization_id=organization_id or None
+        )
+
+        if result.get('success'):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        print(f"[Import Bluebeam Fresh] Error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ============================================================
