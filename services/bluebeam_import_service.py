@@ -706,6 +706,11 @@ def _apply_changes_to_database(
     """
     Apply diff changes to the database.
 
+    Only updates columns that exist in extraction_detections_draft:
+    id, job_id, page_id, class, detection_index, confidence,
+    pixel_x, pixel_y, pixel_width, pixel_height, status, is_deleted,
+    is_user_created, updated_at
+
     Args:
         changes: List of change records from diff
         job_id: Job UUID
@@ -727,35 +732,42 @@ def _apply_changes_to_database(
                 det_id = change['detection_id']
                 updates = {}
 
+                # Only update pixel coordinates (columns that exist)
                 if 'new_coords' in change:
-                    updates.update(change['new_coords'])
-                    updates['geometry_modified_at'] = datetime.now(timezone.utc).isoformat()
-                    updates['geometry_modified_source'] = 'bluebeam_import'
+                    updates['pixel_x'] = change['new_coords'].get('pixel_x')
+                    updates['pixel_y'] = change['new_coords'].get('pixel_y')
+                    updates['pixel_width'] = change['new_coords'].get('pixel_width')
+                    updates['pixel_height'] = change['new_coords'].get('pixel_height')
 
+                # Update class if changed
                 if 'new_class' in change:
                     updates['class'] = change['new_class']
-                    updates['class_modified_at'] = datetime.now(timezone.utc).isoformat()
-                    updates['class_modified_source'] = 'bluebeam_import'
 
                 if updates:
+                    print(f"[Bluebeam Import] Updating detection {det_id}: {updates}", flush=True)
                     result = update_detection(det_id, updates)
                     if result:
                         applied['modified'] += 1
+                        print(f"[Bluebeam Import] Successfully updated detection {det_id}", flush=True)
                     else:
                         applied['errors'] += 1
+                        print(f"[Bluebeam Import] Failed to update detection {det_id}: update_detection returned {result}", flush=True)
 
             elif change_type == 'deleted':
                 det_id = change['detection_id']
-                # Soft delete - set is_deleted flag
-                result = update_detection(det_id, {
+                # Soft delete - only use columns that exist
+                updates = {
                     'status': 'deleted',
-                    'deleted_at': datetime.now(timezone.utc).isoformat(),
-                    'deleted_source': 'bluebeam_import'
-                })
+                    'is_deleted': True
+                }
+                print(f"[Bluebeam Import] Deleting detection {det_id}: {updates}", flush=True)
+                result = update_detection(det_id, updates)
                 if result:
                     applied['deleted'] += 1
+                    print(f"[Bluebeam Import] Successfully deleted detection {det_id}", flush=True)
                 else:
                     applied['errors'] += 1
+                    print(f"[Bluebeam Import] Failed to delete detection {det_id}: update_detection returned {result}", flush=True)
 
             elif change_type == 'added':
                 page_id = change['page_id']
@@ -769,59 +781,58 @@ def _apply_changes_to_database(
                 })
                 next_index = (existing[0]['detection_index'] + 1) if existing else 1
 
+                # Only include columns that exist in the table
                 new_detection = {
                     'id': str(uuid.uuid4()),
                     'job_id': job_id,
                     'page_id': page_id,
                     'class': change['class'],
                     'detection_index': next_index,
-                    'confidence': 1.0,  # User-created
+                    'confidence': 1.0,
                     'status': 'manual',
                     'is_user_created': True,
-                    'created_source': 'bluebeam_import',
-                    'created_at': datetime.now(timezone.utc).isoformat(),
-                    **change['coords']
+                    'is_deleted': False,
+                    'pixel_x': change['coords'].get('pixel_x'),
+                    'pixel_y': change['coords'].get('pixel_y'),
+                    'pixel_width': change['coords'].get('pixel_width'),
+                    'pixel_height': change['coords'].get('pixel_height'),
                 }
 
-                # Calculate real-world measurements if page has scale
-                scale_ratio = page_data.get('scale_ratio')
-                dpi = page_data.get('dpi') or 200
-                if scale_ratio:
-                    from geometry.calculations import calculate_real_dimensions
-                    real_dims = calculate_real_dimensions(
-                        change['coords']['pixel_width'],
-                        change['coords']['pixel_height'],
-                        scale_ratio,
-                        dpi
-                    )
-                    new_detection.update(real_dims)
-
+                print(f"[Bluebeam Import] Creating detection: {new_detection}", flush=True)
                 result = supabase_request('POST', 'extraction_detections_draft', new_detection)
                 if result:
                     applied['added'] += 1
                     # Add the new ID to the change record for response
                     change['new_detection_id'] = new_detection['id']
+                    print(f"[Bluebeam Import] Successfully created detection {new_detection['id']}", flush=True)
                 else:
                     applied['errors'] += 1
+                    print(f"[Bluebeam Import] Failed to create detection: supabase_request returned {result}", flush=True)
 
             elif change_type == 'readded':
                 det_id = change['detection_id']
-                # Re-enable a deleted detection
+                # Re-enable a deleted detection - only use columns that exist
                 updates = {
                     'status': 'manual',
-                    'deleted_at': None,
-                    'readded_at': datetime.now(timezone.utc).isoformat(),
-                    'readded_source': 'bluebeam_import',
-                    **change['new_coords']
+                    'is_deleted': False,
+                    'pixel_x': change['new_coords'].get('pixel_x'),
+                    'pixel_y': change['new_coords'].get('pixel_y'),
+                    'pixel_width': change['new_coords'].get('pixel_width'),
+                    'pixel_height': change['new_coords'].get('pixel_height'),
                 }
+                print(f"[Bluebeam Import] Re-adding detection {det_id}: {updates}", flush=True)
                 result = update_detection(det_id, updates)
                 if result:
                     applied['readded'] += 1
+                    print(f"[Bluebeam Import] Successfully re-added detection {det_id}", flush=True)
                 else:
                     applied['errors'] += 1
+                    print(f"[Bluebeam Import] Failed to re-add detection {det_id}: update_detection returned {result}", flush=True)
 
         except Exception as e:
             print(f"[Bluebeam Import] Error applying {change_type}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             applied['errors'] += 1
 
     print(f"[Bluebeam Import] Applied changes: {applied}", flush=True)
