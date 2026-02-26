@@ -513,11 +513,18 @@ def import_bluebeam_pdf(
                     image_height
                 )
                 changes.append({
-                    'action': 'readded',
+                    'change_type': 'readded',
                     'detection_id': det_id,
                     'class': detected_class,
                     'page_id': page_data['id'],
+                    'page_number': db_page_number,
                     'new_coords': new_coords,
+                    'imported_bbox': {
+                        'x': new_coords['pixel_x'],
+                        'y': new_coords['pixel_y'],
+                        'w': new_coords['pixel_width'],
+                        'h': new_coords['pixel_height']
+                    },
                     'notes': annot.get('contents')
                 })
                 continue
@@ -576,15 +583,22 @@ def import_bluebeam_pdf(
 
             if geometry_changed or class_changed:
                 change = {
-                    'action': 'modified',
+                    'change_type': 'modified',
                     'detection_id': det_id,
                     'page_id': page_data['id'],
+                    'page_number': db_page_number,
                 }
 
                 if geometry_changed:
                     change['field'] = 'geometry'
                     change['old_coords'] = original_coords
                     change['new_coords'] = new_coords
+                    change['imported_bbox'] = {
+                        'x': new_coords['pixel_x'],
+                        'y': new_coords['pixel_y'],
+                        'w': new_coords['pixel_width'],
+                        'h': new_coords['pixel_height']
+                    }
 
                     # Calculate area change if it's an area detection
                     old_area = original.get('area_sf', 0)
@@ -615,11 +629,17 @@ def import_bluebeam_pdf(
                 image_height
             )
             changes.append({
-                'action': 'added',
+                'change_type': 'added',
                 'class': detected_class,
                 'page_id': page_data['id'],
                 'page_number': db_page_number,
                 'coords': new_coords,
+                'imported_bbox': {
+                    'x': new_coords['pixel_x'],
+                    'y': new_coords['pixel_y'],
+                    'w': new_coords['pixel_width'],
+                    'h': new_coords['pixel_height']
+                },
                 'notes': annot.get('contents'),
                 'annot_type': annot.get('annot_type')
             })
@@ -645,20 +665,21 @@ def import_bluebeam_pdf(
             page_data = page_id_lookup.get(detection.get('page_id'))
             if page_data and page_data['page_number'] in pages_with_annotations:
                 changes.append({
-                    'action': 'deleted',
+                    'change_type': 'deleted',
                     'detection_id': det_id,
                     'class': detection.get('class'),
                     'page_id': detection.get('page_id'),
+                    'page_number': page_data['page_number'],
                     'area_sf': detection.get('area_sf')
                 })
 
     # 7. Calculate summary
     summary = {
-        'unchanged': len(detection_lookup) - sum(1 for c in changes if c['action'] in ['modified', 'deleted', 'readded']),
-        'modified': sum(1 for c in changes if c['action'] == 'modified'),
-        'deleted': sum(1 for c in changes if c['action'] == 'deleted'),
-        'added': sum(1 for c in changes if c['action'] == 'added'),
-        'readded': sum(1 for c in changes if c['action'] == 'readded'),
+        'unchanged': len(detection_lookup) - sum(1 for c in changes if c['change_type'] in ['modified', 'deleted', 'readded']),
+        'modified': sum(1 for c in changes if c['change_type'] == 'modified'),
+        'deleted': sum(1 for c in changes if c['change_type'] == 'deleted'),
+        'added': sum(1 for c in changes if c['change_type'] == 'added'),
+        'readded': sum(1 for c in changes if c['change_type'] == 'readded'),
     }
 
     print(f"[Bluebeam Import] Diff complete: {summary}", flush=True)
@@ -699,10 +720,10 @@ def _apply_changes_to_database(
     page_id_lookup = {p['id']: p for p in pages}
 
     for change in changes:
-        action = change['action']
+        change_type = change.get('change_type') or change.get('action')  # Support both for backward compat
 
         try:
-            if action == 'modified':
+            if change_type == 'modified':
                 det_id = change['detection_id']
                 updates = {}
 
@@ -723,7 +744,7 @@ def _apply_changes_to_database(
                     else:
                         applied['errors'] += 1
 
-            elif action == 'deleted':
+            elif change_type == 'deleted':
                 det_id = change['detection_id']
                 # Soft delete - set is_deleted flag
                 result = update_detection(det_id, {
@@ -736,7 +757,7 @@ def _apply_changes_to_database(
                 else:
                     applied['errors'] += 1
 
-            elif action == 'added':
+            elif change_type == 'added':
                 page_id = change['page_id']
                 page_data = page_id_lookup.get(page_id, {})
 
@@ -783,7 +804,7 @@ def _apply_changes_to_database(
                 else:
                     applied['errors'] += 1
 
-            elif action == 'readded':
+            elif change_type == 'readded':
                 det_id = change['detection_id']
                 # Re-enable a deleted detection
                 updates = {
@@ -800,7 +821,7 @@ def _apply_changes_to_database(
                     applied['errors'] += 1
 
         except Exception as e:
-            print(f"[Bluebeam Import] Error applying {action}: {e}", flush=True)
+            print(f"[Bluebeam Import] Error applying {change_type}: {e}", flush=True)
             applied['errors'] += 1
 
     print(f"[Bluebeam Import] Applied changes: {applied}", flush=True)
