@@ -564,7 +564,7 @@ def import_bluebeam_fresh(
             'project_id': project_id,
             'project_name': project_name or 'Bluebeam Import',
             'status': 'importing',
-            'stage': 'bluebeam_import',
+            'stage': 'uploaded',
             'source_pdf_url': None,  # No source PDF URL for fresh imports
         }
 
