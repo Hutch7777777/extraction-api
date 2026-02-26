@@ -602,6 +602,7 @@ def import_bluebeam_fresh(
             }
 
             page_record = create_page(page_data)
+            if isinstance(page_record, list): page_record = page_record[0]
             if page_record:
                 # Add dimensions back for annotation parsing
                 page_record['width'] = page_img['width']
