@@ -638,6 +638,20 @@ def import_bluebeam_fresh(
 
         # 6. Batch insert detections into extraction_detections_draft
         if all_detections:
+            # Strip keys that don't exist in extraction_detections_draft table
+            ALLOWED_COLUMNS = {
+                'id', 'job_id', 'page_id', 'source_detection_id', 'class',
+                'pixel_x', 'pixel_y', 'pixel_width', 'pixel_height',
+                'confidence', 'detection_index', 'matched_tag', 'is_triangle',
+                'assigned_material_id', 'material_notes', 'is_deleted',
+                'is_user_created', 'polygon_points', 'markup_type',
+                'marker_label', 'material_cost_override', 'color_override', 'status'
+            }
+            for det in all_detections:
+                keys_to_remove = [k for k in det if k not in ALLOWED_COLUMNS]
+                for k in keys_to_remove:
+                    del det[k]
+
             # Normalize all detections to have consistent keys for PostgREST batch insert
             all_keys = set()
             for det in all_detections:
