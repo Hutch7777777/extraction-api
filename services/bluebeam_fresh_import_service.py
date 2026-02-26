@@ -643,8 +643,11 @@ def import_bluebeam_fresh(
             for i in range(0, len(all_detections), batch_size):
                 batch = all_detections[i:i + batch_size]
                 result = supabase_request('POST', 'extraction_detections_draft', batch)
-                if not result:
-                    print(f"[Bluebeam Fresh] Warning: Failed to insert batch {i // batch_size + 1}", flush=True)
+                if result:
+                    print(f"[Bluebeam Fresh] Inserted batch {i // batch_size + 1} ({len(batch)} detections)", flush=True)
+                else:
+                    print(f"[Bluebeam Fresh] FAILED batch {i // batch_size + 1}. Sample detection keys: {list(batch[0].keys())}", flush=True)
+                    print(f"[Bluebeam Fresh] Sample detection: {batch[0]}", flush=True)
 
         # 7. Build detection summary by class
         detection_summary = {}
@@ -665,9 +668,9 @@ def import_bluebeam_fresh(
             detection_summary[cls]['total_sf'] = round(detection_summary[cls]['total_sf'], 2)
             detection_summary[cls]['total_lf'] = round(detection_summary[cls]['total_lf'], 2)
 
-        # 8. Update job status to 'classified' (ready for Detection Editor)
+        # 8. Update job status to 'complete' (ready for Detection Editor)
         update_job(job_id, {
-            'status': 'classified',
+            'status': 'complete',
             'total_pages': total_pages,
             'elevation_count': total_pages,  # Assume all pages are elevations
             'total_detections': len(all_detections),
