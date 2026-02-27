@@ -99,7 +99,7 @@ COLOR_TO_CLASS = {
 
 # Keyword-based class suggestion for Bluebeam subjects
 SUBJECT_KEYWORDS = {
-    'siding': ['lap siding', 'board & batten', 'board and batten', 'shingle siding',
+    'siding': ['lap siding', 'lap deduct', 'board & batten', 'board and batten', 'shingle siding',
                'panel siding', 'fiber cement panel', 'shake siding', 'horizontal siding',
                'vertical siding', 'reveal', 'hardie'],
     'trim': ['trim count', 'trim'],
@@ -128,12 +128,12 @@ SUBJECT_KEYWORDS = {
     'vent': ['vent'],
 }
 
-# Subjects to skip by default (not construction elements)
+# Subjects to skip by default (non-construction measurement/annotation tools)
+# Keep this list MINIMAL - only skip obvious non-elements
 SKIP_SUBJECTS = [
-    'length measurement', 'arrow', 'legend', 'callout', 'text', 'note',
-    'cloud', 'dimension', 'leader', 'markup', 'highlight', 'stamp',
-    'polyline', 'rectangle', 'ellipse', 'polygon', 'area measurement',
-    'perimeter', 'count', 'calibration'
+    'length measurement',
+    'arrow',
+    'legend',
 ]
 
 
@@ -152,16 +152,21 @@ def suggest_class_from_subject(subject: str) -> str:
 
     subject_lower = subject.lower().strip()
 
-    # Check if this should be skipped
-    for skip_pattern in SKIP_SUBJECTS:
-        if skip_pattern in subject_lower:
-            return 'SKIP'
+    # Handle "(No Subject)" annotations - suggest unknown, not SKIP
+    if subject_lower.startswith('(no subject'):
+        return 'unknown'
 
-    # Check keyword matches (longer matches first for specificity)
+    # Check keyword matches FIRST (longer matches first for specificity)
+    # This ensures "Trim Count" matches "trim" before checking skip patterns
     for class_name, keywords in SUBJECT_KEYWORDS.items():
         for keyword in sorted(keywords, key=len, reverse=True):
             if keyword in subject_lower:
                 return class_name
+
+    # Only skip if no construction keyword was found
+    for skip_pattern in SKIP_SUBJECTS:
+        if skip_pattern in subject_lower:
+            return 'SKIP'
 
     return 'unknown'
 
