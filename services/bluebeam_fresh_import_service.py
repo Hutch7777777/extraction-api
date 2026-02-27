@@ -100,7 +100,7 @@ COLOR_TO_CLASS = {
 
 # Keyword-based class suggestion for Bluebeam subjects
 SUBJECT_KEYWORDS = {
-    'siding': ['lap siding', 'lap deduct', 'board & batten', 'board and batten', 'shingle siding',
+    'siding': ['lap siding', 'board & batten', 'board and batten', 'shingle siding',
                'panel siding', 'fiber cement panel', 'shake siding', 'horizontal siding',
                'vertical siding', 'reveal', 'hardie'],
     'trim': ['trim count', 'trim'],
@@ -111,7 +111,7 @@ SUBJECT_KEYWORDS = {
     'gutter': ['gutter'],
     'downspout': ['downspout'],
     'wrb': ['wrb', 'house wrap', 'weather barrier'],
-    'window': ['window'],
+    'window': ['window', 'lap deduct', 'deduct'],
     'door': ['door', 'sgd', 'swing'],
     'garage': ['garage door', 'garage'],
     'corner_outside': ['outside corner', 'corner'],
