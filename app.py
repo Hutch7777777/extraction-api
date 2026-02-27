@@ -1998,6 +1998,68 @@ def import_bluebeam_preview():
 # BLUEBEAM FRESH IMPORT (No Prior Job Required)
 # ============================================================
 
+@app.route('/import-bluebeam-fresh/preview', methods=['POST'])
+def import_bluebeam_fresh_preview_endpoint():
+    """
+    Preview Bluebeam annotations - scan PDF and return unique subjects.
+    Does NOT create any database records. Use for class mapping step.
+
+    Request:
+        Content-Type: multipart/form-data
+        Body:
+            - pdf_file: The annotated PDF file (file upload, required)
+
+    Response:
+        success: bool
+        total_pages: int - number of pages in the PDF
+        total_annotations: int - total annotation count
+        subjects: list - unique subjects with suggested classes
+            [
+                {
+                    "subject": "7\" Reveal Horizontal Lap Siding",
+                    "count": 16,
+                    "annotation_type": "Polygon",
+                    "sample_content": "141 sf",
+                    "suggested_class": "siding"
+                },
+                ...
+            ]
+        error: str (if failed)
+    """
+    from services.bluebeam_fresh_import_service import preview_bluebeam_fresh
+
+    # Get PDF file
+    pdf_file = request.files.get('pdf_file')
+    if not pdf_file:
+        return jsonify({'success': False, 'error': 'pdf_file is required'}), 400
+
+    # Read PDF bytes
+    try:
+        pdf_bytes = pdf_file.read()
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Failed to read PDF file: {e}'}), 400
+
+    if len(pdf_bytes) == 0:
+        return jsonify({'success': False, 'error': 'PDF file is empty'}), 400
+
+    print(f"[Import Bluebeam Preview] Scanning PDF, size: {len(pdf_bytes)} bytes", flush=True)
+
+    # Run preview
+    try:
+        result = preview_bluebeam_fresh(pdf_bytes)
+
+        if result.get('success'):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        print(f"[Import Bluebeam Preview] Error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/import-bluebeam-fresh', methods=['POST'])
 def import_bluebeam_fresh_endpoint():
     """
@@ -2015,6 +2077,8 @@ def import_bluebeam_fresh_endpoint():
             - project_id: UUID of the project (form field, required)
             - project_name: Display name for the project (form field, optional)
             - organization_id: Organization UUID for multi-tenant (form field, optional)
+            - class_mapping: JSON string mapping subjects to classes (form field, optional)
+                             Example: {"7\" Reveal Siding": "siding", "Length Measurement": "SKIP"}
 
     Response:
         success: bool
@@ -2032,22 +2096,34 @@ def import_bluebeam_fresh_endpoint():
         error: str (if failed)
 
     Notes:
-        - Creates extraction_job with status='importing', then updates to 'classified'
+        - Creates extraction_job with status='importing', then updates to 'complete'
         - Converts PDF pages to images at 150 DPI
         - Uploads images to Supabase Storage
         - Parses polygons, polylines, rectangles, and count markers
-        - Infers class from annotation Subject field, color, or defaults
+        - Uses class_mapping if provided, otherwise infers class from Subject/color
+        - Subjects mapped to 'SKIP' are not imported
         - User reviews in Detection Editor at /projects/[id]/extraction/[jobId]
     """
     from services.bluebeam_fresh_import_service import import_bluebeam_fresh
+    import json
 
     # Get form data
     project_id = request.form.get('project_id')
     project_name = request.form.get('project_name', '')
     organization_id = request.form.get('organization_id', '')
+    class_mapping_str = request.form.get('class_mapping', '')
 
     if not project_id:
         return jsonify({'success': False, 'error': 'project_id is required'}), 400
+
+    # Parse class mapping if provided
+    subject_class_map = None
+    if class_mapping_str:
+        try:
+            subject_class_map = json.loads(class_mapping_str)
+            print(f"[Import Bluebeam Fresh] Using class mapping with {len(subject_class_map)} entries", flush=True)
+        except json.JSONDecodeError as e:
+            return jsonify({'success': False, 'error': f'Invalid class_mapping JSON: {e}'}), 400
 
     # Get PDF file
     pdf_file = request.files.get('pdf_file')
@@ -2071,7 +2147,8 @@ def import_bluebeam_fresh_endpoint():
             pdf_bytes=pdf_bytes,
             project_id=project_id,
             project_name=project_name or None,
-            organization_id=organization_id or None
+            organization_id=organization_id or None,
+            subject_class_map=subject_class_map
         )
 
         if result.get('success'):

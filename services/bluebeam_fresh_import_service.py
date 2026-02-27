@@ -97,6 +97,229 @@ COLOR_TO_CLASS = {
     '#804000': 'corner_outside', # Brown = corners
 }
 
+# Keyword-based class suggestion for Bluebeam subjects
+SUBJECT_KEYWORDS = {
+    'siding': ['lap siding', 'board & batten', 'board and batten', 'shingle siding',
+               'panel siding', 'fiber cement panel', 'shake siding', 'horizontal siding',
+               'vertical siding', 'reveal', 'hardie'],
+    'trim': ['trim count', 'trim'],
+    'soffit': ['soffit'],
+    'fascia': ['fascia'],
+    'flashing': ['flashing count', 'head flashing', 'flashing'],
+    'corbel': ['corbel'],
+    'gutter': ['gutter'],
+    'downspout': ['downspout'],
+    'wrb': ['wrb', 'house wrap', 'weather barrier'],
+    'window': ['window'],
+    'door': ['door', 'sgd', 'swing'],
+    'garage': ['garage door', 'garage'],
+    'corner_outside': ['outside corner', 'corner'],
+    'corner_inside': ['inside corner'],
+    'belly_band': ['belly band'],
+    'column': ['column'],
+    'post': ['post'],
+    'roof': ['roof'],
+    'gable': ['gable'],
+    'eave': ['eave'],
+    'rake': ['rake'],
+    'ridge': ['ridge'],
+    'valley': ['valley'],
+    'shutter': ['shutter'],
+    'vent': ['vent'],
+}
+
+# Subjects to skip by default (not construction elements)
+SKIP_SUBJECTS = [
+    'length measurement', 'arrow', 'legend', 'callout', 'text', 'note',
+    'cloud', 'dimension', 'leader', 'markup', 'highlight', 'stamp',
+    'polyline', 'rectangle', 'ellipse', 'polygon', 'area measurement',
+    'perimeter', 'count', 'calibration'
+]
+
+
+def suggest_class_from_subject(subject: str) -> str:
+    """
+    Suggest a detection class based on the Bluebeam subject using keyword matching.
+
+    Args:
+        subject: The annotation subject string from Bluebeam
+
+    Returns:
+        Suggested class name, 'SKIP' for non-construction elements, or 'unknown'
+    """
+    if not subject:
+        return 'unknown'
+
+    subject_lower = subject.lower().strip()
+
+    # Check if this should be skipped
+    for skip_pattern in SKIP_SUBJECTS:
+        if skip_pattern in subject_lower:
+            return 'SKIP'
+
+    # Check keyword matches (longer matches first for specificity)
+    for class_name, keywords in SUBJECT_KEYWORDS.items():
+        for keyword in sorted(keywords, key=len, reverse=True):
+            if keyword in subject_lower:
+                return class_name
+
+    return 'unknown'
+
+
+def get_annotation_type_name(annot_type: int) -> str:
+    """Convert PyMuPDF annotation type code to human-readable name."""
+    type_names = {
+        0: 'Text',
+        1: 'Link',
+        2: 'FreeText',
+        3: 'Line',
+        4: 'Square',
+        5: 'Circle',
+        6: 'Polygon',
+        7: 'PolyLine',
+        8: 'Highlight',
+        9: 'Underline',
+        10: 'Squiggly',
+        11: 'StrikeOut',
+        12: 'Redact',
+        13: 'Stamp',
+        14: 'Caret',
+        15: 'Ink',
+        16: 'Popup',
+        17: 'FileAttachment',
+        18: 'Sound',
+        19: 'Movie',
+        20: 'Widget',
+        21: 'Screen',
+        22: 'PrinterMark',
+        23: 'TrapNet',
+        24: 'Watermark',
+        25: '3D',
+    }
+    return type_names.get(annot_type, f'Type-{annot_type}')
+
+
+# =============================================================================
+# PREVIEW FUNCTION (No DB writes)
+# =============================================================================
+
+def preview_bluebeam_fresh(pdf_bytes: bytes) -> Dict[str, Any]:
+    """
+    Scan a Bluebeam-annotated PDF and return unique subjects with counts.
+    Does NOT create any database records - for preview/mapping step only.
+
+    Args:
+        pdf_bytes: Raw PDF file bytes
+
+    Returns:
+        Dict with:
+        - success: bool
+        - total_pages: int
+        - total_annotations: int
+        - subjects: list of {subject, count, annotation_type, sample_content, suggested_class}
+        - error: str (if failed)
+    """
+    if fitz is None:
+        return {
+            'success': False,
+            'error': 'pymupdf not installed. Run: pip install pymupdf'
+        }
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        total_pages = len(doc)
+
+        # Collect subject info: {subject: {count, annotation_types, sample_contents}}
+        subject_data = {}
+        total_annotations = 0
+
+        for page_num in range(total_pages):
+            page = doc[page_num]
+
+            for annot in page.annots():
+                if annot is None:
+                    continue
+
+                annot_type = annot.type[0]
+
+                # Skip non-markup annotations
+                if annot_type in (0, 1, 19, 20):  # Link, Text, Widget, Popup
+                    continue
+
+                total_annotations += 1
+
+                # Get subject
+                subject = ''
+                try:
+                    subject = (annot.info.get('subject') or '').strip()
+                except:
+                    pass
+
+                if not subject:
+                    subject = f'(No Subject - {get_annotation_type_name(annot_type)})'
+
+                # Get content (may contain measurement values)
+                content = ''
+                try:
+                    content = (annot.info.get('content') or '').strip()
+                except:
+                    pass
+
+                # Track this subject
+                if subject not in subject_data:
+                    subject_data[subject] = {
+                        'count': 0,
+                        'annotation_types': set(),
+                        'sample_contents': [],
+                    }
+
+                subject_data[subject]['count'] += 1
+                subject_data[subject]['annotation_types'].add(get_annotation_type_name(annot_type))
+
+                # Store up to 3 sample contents
+                if content and len(subject_data[subject]['sample_contents']) < 3:
+                    if content not in subject_data[subject]['sample_contents']:
+                        subject_data[subject]['sample_contents'].append(content)
+
+        doc.close()
+
+        # Build response list sorted by count descending
+        subjects = []
+        for subject, data in subject_data.items():
+            # Get the most common annotation type
+            annotation_types = list(data['annotation_types'])
+            primary_type = annotation_types[0] if len(annotation_types) == 1 else ', '.join(sorted(annotation_types))
+
+            # Get sample content
+            sample_content = data['sample_contents'][0] if data['sample_contents'] else None
+
+            subjects.append({
+                'subject': subject,
+                'count': data['count'],
+                'annotation_type': primary_type,
+                'sample_content': sample_content,
+                'suggested_class': suggest_class_from_subject(subject),
+            })
+
+        # Sort by count descending
+        subjects.sort(key=lambda x: x['count'], reverse=True)
+
+        return {
+            'success': True,
+            'total_pages': total_pages,
+            'total_annotations': total_annotations,
+            'subjects': subjects,
+        }
+
+    except Exception as e:
+        print(f"[Bluebeam Preview] Error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -435,10 +658,17 @@ def parse_stamp_annotation(annot, scale_x: float, scale_y: float, page_record: D
     }
 
 
-def parse_page_annotations(pdf_page, page_record: Dict, page_index: int) -> List[Dict]:
+def parse_page_annotations(pdf_page, page_record: Dict, page_index: int, subject_class_map: Dict[str, str] = None) -> List[Dict]:
     """
     Extract all annotations from a PDF page.
     Handles: rectangles, polygons, polylines, points/stamps.
+
+    Args:
+        pdf_page: PyMuPDF page object
+        page_record: Page record dict with id, job_id, dimensions
+        page_index: Zero-based page index
+        subject_class_map: Optional mapping of Bluebeam subjects to class names.
+                           If a subject maps to 'SKIP', the annotation is skipped.
     """
     detections = []
     page_id = page_record['id']
@@ -470,8 +700,26 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int) -> List
         if annot_type in (0, 1, 2, 19, 20):  # Link, Text, FreeText, Widget, Popup
             continue
 
-        # Infer class from annotation properties
-        det_class = infer_class(annot)
+        # Get the annotation subject (used for class mapping and marker_label)
+        annot_subject = ''
+        try:
+            annot_subject = (annot.info.get('subject') or '').strip()
+        except:
+            pass
+
+        # If subject_class_map is provided, use it to determine class
+        det_class = None
+        if subject_class_map and annot_subject:
+            mapped_class = subject_class_map.get(annot_subject)
+            if mapped_class == 'SKIP':
+                # Skip this annotation entirely
+                continue
+            elif mapped_class:
+                det_class = mapped_class
+
+        # Fallback to inference if no mapping
+        if det_class is None:
+            det_class = infer_class(annot)
 
         # Determine geometry type and extract coordinates
         detection = None
@@ -514,6 +762,7 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int) -> List
                 'is_user_created': True,
                 'is_deleted': False,
                 'status': 'complete',
+                'marker_label': annot_subject if annot_subject else None,  # Store original Bluebeam subject
             })
             detections.append(detection)
 
@@ -528,7 +777,8 @@ def import_bluebeam_fresh(
     pdf_bytes: bytes,
     project_id: str,
     project_name: str = None,
-    organization_id: str = None
+    organization_id: str = None,
+    subject_class_map: Dict[str, str] = None
 ) -> Dict[str, Any]:
     """
     Full fresh import: PDF → job + pages + detections.
@@ -539,6 +789,8 @@ def import_bluebeam_fresh(
         project_id: UUID of the project to associate with
         project_name: Optional project name for display
         organization_id: Optional organization ID for multi-tenant
+        subject_class_map: Optional mapping of Bluebeam subjects to class names.
+                           If a subject maps to 'SKIP', the annotation is skipped.
 
     Returns:
         Dict with:
@@ -626,7 +878,7 @@ def import_bluebeam_fresh(
                 })
                 continue
 
-            detections = parse_page_annotations(pdf_page, page_record, page_num)
+            detections = parse_page_annotations(pdf_page, page_record, page_num, subject_class_map)
             all_detections.extend(detections)
 
             page_annotation_counts.append({
