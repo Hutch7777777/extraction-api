@@ -20,6 +20,7 @@ Key features:
 """
 
 import io
+import re
 import uuid
 import math
 from datetime import datetime, timezone
@@ -169,6 +170,53 @@ def suggest_class_from_subject(subject: str) -> str:
             return 'SKIP'
 
     return 'unknown'
+
+
+def parse_bluebeam_content(content: str, subject: str) -> dict:
+    """
+    Parse the Bluebeam Content/Comments field to extract measurement values.
+
+    Examples:
+      "141 sf" → {'area_sf': 141.0}
+      "502 sf" → {'area_sf': 502.0}
+      "0'-6\"" → (length measurement, skip)
+      "6" (with "Trim Count" subject) → {'item_count': 6}
+      "3" (with "Flashing Count" subject) → {'item_count': 3}
+      "10" (with "Corbel Count" subject) → {'item_count': 10}
+    """
+    if not content:
+        return {}
+
+    content = content.strip()
+    result = {}
+
+    # Check for SF area: "141 sf", "502 sf", "30 sf"
+    sf_match = re.match(r'^([\d,.]+)\s*sf\s*$', content, re.IGNORECASE)
+    if sf_match:
+        result['area_sf'] = float(sf_match.group(1).replace(',', ''))
+        return result
+
+    # Check for LF length: "12.5 lf", "8 lf"
+    lf_match = re.match(r'^([\d,.]+)\s*lf\s*$', content, re.IGNORECASE)
+    if lf_match:
+        result['perimeter_lf'] = float(lf_match.group(1).replace(',', ''))
+        return result
+
+    # Check for pure count (number only) when subject contains "Count"
+    subject_lower = (subject or '').lower()
+    if 'count' in subject_lower:
+        count_match = re.match(r'^(\d+)\s*$', content)
+        if count_match:
+            result['item_count'] = int(count_match.group(1))
+            return result
+
+    # Check for pure number (could be sf if subject suggests area)
+    num_match = re.match(r'^([\d,.]+)\s*$', content)
+    if num_match and any(kw in subject_lower for kw in ['siding', 'soffit', 'wrb', 'panel', 'batten', 'shingle']):
+        result['area_sf'] = float(num_match.group(1).replace(',', ''))
+        return result
+
+    return {}
 
 
 def get_annotation_type_name(annot_type: int) -> str:
@@ -707,8 +755,10 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int, subject
 
         # Get the annotation subject (used for class mapping and marker_label)
         annot_subject = ''
+        annot_content = ''
         try:
             annot_subject = (annot.info.get('subject') or '').strip()
+            annot_content = (annot.info.get('content') or '').strip()
         except:
             pass
 
@@ -768,7 +818,19 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int, subject
                 'is_deleted': False,
                 'status': 'complete',
                 'marker_label': annot_subject if annot_subject else None,  # Store original Bluebeam subject
+                'bluebeam_content': annot_content if annot_content else None,
             })
+
+            # Parse Bluebeam content field for real measurement values
+            if annot_content:
+                parsed_values = parse_bluebeam_content(annot_content, annot_subject)
+                if 'area_sf' in parsed_values:
+                    detection['area_sf'] = parsed_values['area_sf']
+                if 'perimeter_lf' in parsed_values:
+                    detection['perimeter_lf'] = parsed_values['perimeter_lf']
+                if 'item_count' in parsed_values:
+                    detection['item_count'] = parsed_values['item_count']
+
             detections.append(detection)
 
     return detections
@@ -902,7 +964,8 @@ def import_bluebeam_fresh(
                 'confidence', 'detection_index', 'matched_tag', 'is_triangle',
                 'assigned_material_id', 'material_notes', 'is_deleted',
                 'is_user_created', 'polygon_points', 'markup_type',
-                'marker_label', 'material_cost_override', 'color_override', 'status'
+                'marker_label', 'material_cost_override', 'color_override', 'status',
+                'area_sf', 'perimeter_lf', 'item_count', 'bluebeam_content'
             }
             for det in all_detections:
                 keys_to_remove = [k for k in det if k not in ALLOWED_COLUMNS]
