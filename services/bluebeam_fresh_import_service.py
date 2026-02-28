@@ -499,13 +499,15 @@ def convert_and_upload_pages(doc, job_id: str, dpi: int = 150) -> List[Dict[str,
     """
     Convert PDF pages to images and upload to Supabase Storage.
 
+    Renders both clean (no annotations) and annotated versions for Bluebeam imports.
+
     Args:
         doc: PyMuPDF document object
         job_id: UUID of the extraction job
         dpi: Resolution for image conversion (default 150)
 
     Returns:
-        List of page info dicts with image_url, thumbnail_url, width, height, dpi
+        List of page info dicts with image_url, thumbnail_url, annotated_image_url, width, height, dpi
     """
     pages = []
 
@@ -515,16 +517,25 @@ def convert_and_upload_pages(doc, job_id: str, dpi: int = 150) -> List[Dict[str,
 
         print(f"[Bluebeam Fresh] Converting page {page_num}/{len(doc)}", flush=True)
 
-        # Render at specified DPI (annots=False to render without Bluebeam markup overlays)
         mat = fitz.Matrix(dpi / 72, dpi / 72)
+
+        # Render clean image (without Bluebeam markup overlays)
         pix = page.get_pixmap(matrix=mat, annots=False)
         img_bytes = pix.tobytes("png")
 
-        # Upload full image
+        # Upload clean image
         path = f"extraction-pages/{job_id}/page-{page_num}.png"
         image_url = upload_to_storage(img_bytes, path, 'image/png', bucket='extraction-markups')
 
-        # Generate and upload thumbnail (25% size, also without annotations)
+        # Render annotated image (WITH Bluebeam markup overlays visible)
+        pix_annotated = page.get_pixmap(matrix=mat, annots=True)
+        annotated_bytes = pix_annotated.tobytes("png")
+
+        # Upload annotated image
+        annotated_path = f"extraction-pages/{job_id}/page-{page_num}_annotated.png"
+        annotated_image_url = upload_to_storage(annotated_bytes, annotated_path, 'image/png', bucket='extraction-markups')
+
+        # Generate and upload thumbnail (25% size, clean version only)
         thumb_mat = fitz.Matrix(dpi / 72 * 0.25, dpi / 72 * 0.25)
         thumb_pix = page.get_pixmap(matrix=thumb_mat, annots=False)
         thumb_bytes = thumb_pix.tobytes("png")
@@ -534,6 +545,7 @@ def convert_and_upload_pages(doc, job_id: str, dpi: int = 150) -> List[Dict[str,
         pages.append({
             'page_number': page_num,
             'image_url': image_url,
+            'annotated_image_url': annotated_image_url,
             'thumbnail_url': thumb_url,
             'width': pix.width,
             'height': pix.height,
@@ -911,6 +923,7 @@ def import_bluebeam_fresh(
                 'job_id': job_id,
                 'page_number': page_img['page_number'],
                 'image_url': page_img['image_url'],
+                'annotated_image_url': page_img.get('annotated_image_url'),
                 'thumbnail_url': page_img.get('thumbnail_url'),
                 'original_image_url': page_img['image_url'],
                 'original_width': page_img['width'],
