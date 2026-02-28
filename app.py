@@ -2164,6 +2164,88 @@ def import_bluebeam_fresh_endpoint():
 
 
 # ============================================================
+# PAGE CLASSIFICATION ENDPOINT
+# ============================================================
+
+VALID_PAGE_TYPES = ['elevation', 'floor_plan', 'roof_plan', 'detail', 'cover', 'section', 'schedule', 'notes']
+
+@app.route('/api/pages/<page_id>/classify', methods=['PATCH'])
+def update_page_classification(page_id):
+    """
+    Update a page's classification (page_type).
+
+    Used by the Detection Editor's right-click context menu on page thumbnails.
+
+    Request:
+        {
+            "page_type": "elevation" | "floor_plan" | "roof_plan" | "detail" | "cover" | "section" | "schedule" | "notes"
+        }
+
+    Response:
+        {
+            "success": true,
+            "page_type": "elevation",
+            "elevation_count": 3  // Updated count for the job
+        }
+    """
+    data = request.json or {}
+    page_type = data.get('page_type')
+
+    if page_type not in VALID_PAGE_TYPES:
+        return jsonify({
+            'success': False,
+            'error': f'Invalid page_type. Must be one of: {", ".join(VALID_PAGE_TYPES)}'
+        }), 400
+
+    # Get the page to find its job_id
+    page = get_page(page_id)
+    if not page:
+        return jsonify({'success': False, 'error': 'Page not found'}), 404
+
+    job_id = page.get('job_id')
+    old_page_type = page.get('page_type')
+
+    # Update the page
+    update_data = {'page_type': page_type}
+
+    # Clear elevation_name if changing away from elevation
+    if page_type != 'elevation' and old_page_type == 'elevation':
+        update_data['elevation_name'] = None
+
+    result = update_page(page_id, update_data)
+    if not result:
+        return jsonify({'success': False, 'error': 'Failed to update page'}), 500
+
+    # Recalculate elevation count for the job
+    elevation_pages = get_elevation_pages(job_id)
+    elevation_count = len(elevation_pages) if elevation_pages else 0
+
+    # Update job's elevation_count
+    update_job(job_id, {'elevation_count': elevation_count})
+
+    # If newly classified as elevation, assign an elevation name
+    if page_type == 'elevation' and old_page_type != 'elevation':
+        # Find highest existing elevation number
+        max_num = 0
+        for ep in (elevation_pages or []):
+            name = ep.get('elevation_name', '') or ''
+            if name.startswith('Elevation '):
+                try:
+                    num = int(name.replace('Elevation ', ''))
+                    max_num = max(max_num, num)
+                except ValueError:
+                    pass
+        new_name = f"Elevation {max_num + 1}"
+        update_page(page_id, {'elevation_name': new_name})
+
+    return jsonify({
+        'success': True,
+        'page_type': page_type,
+        'elevation_count': elevation_count
+    })
+
+
+# ============================================================
 # MAIN
 # ============================================================
 

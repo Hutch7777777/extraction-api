@@ -390,6 +390,42 @@ def normalize_class_name(raw_name: str) -> str:
     return CLASS_MAPPING.get(normalized, normalized.replace(' ', '_'))
 
 
+def classify_page_from_annotations(annotations_on_page: List[Dict], page_num: int) -> str:
+    """
+    Classify a page based on what Bluebeam annotations are present.
+
+    Rules:
+    - Pages with siding/trim/window/flashing/soffit/wrb annotations → 'elevation'
+    - Pages with roof annotations → 'roof_plan'
+    - Pages with only measurement lines or no annotations → 'detail'
+    - Page 1 with no annotations → 'cover'
+    """
+    if not annotations_on_page:
+        return 'cover' if page_num == 1 else 'detail'
+
+    # Check what classes are present
+    classes = set(a.get('class', '') for a in annotations_on_page)
+
+    # Elevation indicators - typical siding/exterior elements
+    elevation_classes = {
+        'siding', 'trim', 'window', 'door', 'garage', 'soffit',
+        'fascia', 'flashing', 'corbel', 'wrb', 'belly_band',
+        'corner_outside', 'corner_inside', 'column', 'post',
+        'gutter', 'downspout', 'shutter', 'exterior_wall',
+        'eave', 'rake', 'stone', 'stucco', 'brick', 'vent'
+    }
+
+    if classes & elevation_classes:
+        return 'elevation'
+
+    # Roof plan indicators
+    roof_classes = {'roof', 'ridge', 'valley', 'gable'}
+    if classes & roof_classes:
+        return 'roof_plan'
+
+    return 'detail'
+
+
 def infer_class_from_color(color: Tuple[float, float, float]) -> Optional[str]:
     """
     Infer detection class from annotation color (fallback when Subject missing).
@@ -943,9 +979,10 @@ def import_bluebeam_fresh(
 
         print(f"[Bluebeam Fresh] Created {len(page_records)} page records", flush=True)
 
-        # 5. Parse annotations from each page
+        # 5. Parse annotations from each page and auto-classify page types
         all_detections = []
         page_annotation_counts = []
+        elevation_count = 0
 
         for page_num in range(total_pages):
             pdf_page = doc[page_num]
@@ -961,12 +998,29 @@ def import_bluebeam_fresh(
             detections = parse_page_annotations(pdf_page, page_record, page_num, subject_class_map)
             all_detections.extend(detections)
 
+            # Auto-classify page based on annotation content
+            page_type = classify_page_from_annotations(detections, page_num + 1)
+
+            # Generate elevation name for elevation pages
+            elevation_name = None
+            if page_type == 'elevation':
+                elevation_count += 1
+                elevation_name = f"Elevation {elevation_count}"
+
+            # Update page record with classification
+            update_data = {'page_type': page_type}
+            if elevation_name:
+                update_data['elevation_name'] = elevation_name
+
+            supabase_request('PATCH', f'extraction_pages?id=eq.{page_record["id"]}', update_data)
+
             page_annotation_counts.append({
                 'page_number': page_num + 1,
-                'annotation_count': len(detections)
+                'annotation_count': len(detections),
+                'page_type': page_type
             })
 
-        print(f"[Bluebeam Fresh] Parsed {len(all_detections)} annotations", flush=True)
+        print(f"[Bluebeam Fresh] Parsed {len(all_detections)} annotations, classified {elevation_count} elevations", flush=True)
 
         # 6. Batch insert detections into extraction_detections_draft
         if all_detections:
@@ -1028,7 +1082,7 @@ def import_bluebeam_fresh(
         update_job(job_id, {
             'status': 'complete',
             'total_pages': total_pages,
-            'elevation_count': total_pages,  # Assume all pages are elevations
+            'elevation_count': elevation_count,  # Actual count from auto-classification
             'total_detections': len(all_detections),
             'completed_at': datetime.now(timezone.utc).isoformat(),
         })
