@@ -515,18 +515,18 @@ def convert_and_upload_pages(doc, job_id: str, dpi: int = 150) -> List[Dict[str,
 
         print(f"[Bluebeam Fresh] Converting page {page_num}/{len(doc)}", flush=True)
 
-        # Render at specified DPI
+        # Render at specified DPI (annots=False to render without Bluebeam markup overlays)
         mat = fitz.Matrix(dpi / 72, dpi / 72)
-        pix = page.get_pixmap(matrix=mat)
+        pix = page.get_pixmap(matrix=mat, annots=False)
         img_bytes = pix.tobytes("png")
 
         # Upload full image
         path = f"extraction-pages/{job_id}/page-{page_num}.png"
         image_url = upload_to_storage(img_bytes, path, 'image/png', bucket='extraction-markups')
 
-        # Generate and upload thumbnail (25% size)
+        # Generate and upload thumbnail (25% size, also without annotations)
         thumb_mat = fitz.Matrix(dpi / 72 * 0.25, dpi / 72 * 0.25)
-        thumb_pix = page.get_pixmap(matrix=thumb_mat)
+        thumb_pix = page.get_pixmap(matrix=thumb_mat, annots=False)
         thumb_bytes = thumb_pix.tobytes("png")
         thumb_path = f"extraction-pages/{job_id}/thumb-{page_num}.png"
         thumb_url = upload_to_storage(thumb_bytes, thumb_path, 'image/png', bucket='extraction-markups')
