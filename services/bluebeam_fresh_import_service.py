@@ -503,6 +503,55 @@ def infer_class(annot) -> str:
     return 'unknown'
 
 
+def deduplicate_count_detections(detections: List[Dict]) -> List[Dict]:
+    """
+    Deduplicate Bluebeam Count markup detections to prevent N×N overcounting.
+
+    Bluebeam Count markups export each click-point as a separate annotation,
+    but each carries the GROUP TOTAL as the value. So 6 clicks = 6 annotations
+    each saying "6" = 36 instead of correct 6.
+
+    FIX: Group by (marker_label, page_id, bluebeam_content) and keep only one.
+
+    Args:
+        detections: List of detection dicts from parse_page_annotations()
+
+    Returns:
+        Deduplicated list of detections
+    """
+    count_detections = []
+    non_count_detections = []
+
+    for det in detections:
+        marker_label = (det.get('marker_label') or '').lower()
+        # Check if this is a Count markup (subject contains "count")
+        if 'count' in marker_label:
+            count_detections.append(det)
+        else:
+            non_count_detections.append(det)
+
+    # Deduplicate count detections by (marker_label, page_id, bluebeam_content)
+    seen = set()
+    deduped_counts = []
+
+    for det in count_detections:
+        key = (
+            det.get('marker_label'),
+            det.get('page_id'),
+            det.get('bluebeam_content')
+        )
+        if key not in seen:
+            seen.add(key)
+            deduped_counts.append(det)
+
+    original_count = len(count_detections)
+    deduped_count = len(deduped_counts)
+    if original_count != deduped_count:
+        print(f"[Bluebeam Fresh] Deduplicated Count markups: {original_count} → {deduped_count} (removed {original_count - deduped_count} duplicates)", flush=True)
+
+    return non_count_detections + deduped_counts
+
+
 def shoelace_area(vertices: List[Tuple[float, float]]) -> float:
     """Calculate polygon area using Shoelace formula."""
     n = len(vertices)
@@ -1021,6 +1070,10 @@ def import_bluebeam_fresh(
             })
 
         print(f"[Bluebeam Fresh] Parsed {len(all_detections)} annotations, classified {elevation_count} elevations", flush=True)
+
+        # 5b. Deduplicate Count markups to prevent N×N overcounting
+        # Bluebeam Count markups export each click-point as separate annotation with GROUP TOTAL
+        all_detections = deduplicate_count_detections(all_detections)
 
         # 6. Batch insert detections into extraction_detections_draft
         if all_detections:
