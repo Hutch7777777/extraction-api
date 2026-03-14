@@ -9,6 +9,7 @@ from database import (
 )
 from core import detect_with_roboflow, ocr_schedule_with_claude, extract_elevation_dimensions
 from geometry import calculate_real_measurements
+from services.detection_postprocess import postprocess_detections
 from config import config
 import datetime
 
@@ -149,19 +150,31 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
             detection = detect_with_roboflow(image_url)
             
             if 'error' not in detection:
-                predictions = detection.get('predictions', [])
-                
+                raw_predictions = detection.get('predictions', [])
 
                 # Extract and save image dimensions from Roboflow response
-                if predictions and predictions[0].get('rle_mask', {}).get('size'):
-                    mask_size = predictions[0]['rle_mask']['size']
+                if raw_predictions and raw_predictions[0].get('rle_mask', {}).get('size'):
+                    mask_size = raw_predictions[0]['rle_mask']['size']
                     img_height, img_width = mask_size[0], mask_size[1]
                     supabase_request('PATCH', f'extraction_pages?id=eq.{page_id}', {
                         'original_width': img_width,
                         'original_height': img_height
                     })
                     print(f"[{job_id}] Saved dimensions: {img_width}x{img_height}", flush=True)
-                # INSERT DETECTIONS INTO DATABASE
+
+                # POST-PROCESS: Filter duplicates, merge garages, drop low-confidence
+                print(f"[{job_id}] Raw Roboflow predictions: {len(raw_predictions)}", flush=True)
+                postprocess_result = postprocess_detections(raw_predictions)
+                predictions = postprocess_result['predictions']
+                pp_stats = postprocess_result['stats']
+
+                # Log post-processing stats
+                if pp_stats['confidence_filtered'] or pp_stats['iou_suppressed'] or pp_stats['doors_merged_to_garages']:
+                    print(f"[{job_id}] Post-process: conf={pp_stats['confidence_filtered']}, "
+                          f"iou={pp_stats['iou_suppressed']}, size={pp_stats['size_filtered']}, "
+                          f"contained={pp_stats['containment_filtered']}, garage_merge={pp_stats['doors_merged_to_garages']}", flush=True)
+
+                # INSERT DETECTIONS INTO DATABASE (post-processed)
                 inserted_count = _insert_detections(job_id, page_id, predictions, scale_ratio, dpi)
                 totals['total_detections'] += inserted_count
                 print(f"[{job_id}] Inserted {inserted_count} detections for page {page_id}", flush=True)

@@ -48,6 +48,7 @@ from services.bluebeam_import_service import (
     aggregate_detections_for_recalc,
     trigger_recalculation_webhook
 )
+from services.detection_postprocess import postprocess_detections
 
 __all__ = [
     # PDF
@@ -104,5 +105,8 @@ __all__ = [
     'import_bluebeam_pdf',
     'get_import_preview',
     'aggregate_detections_for_recalc',
-    'trigger_recalculation_webhook'
+    'trigger_recalculation_webhook',
+
+    # Detection Post-Processing
+    'postprocess_detections'
 ]
