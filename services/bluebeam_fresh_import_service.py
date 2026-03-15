@@ -1151,6 +1151,27 @@ def import_bluebeam_fresh(
             if pricing_items:
                 pricing_by_sku = {p['sku']: p['id'] for p in pricing_items}
                 print(f"[Bluebeam Fresh] Loaded {len(pricing_by_sku)} pricing_items for SKU lookup", flush=True)
+
+                # Log which SKUs from mappings weren't found (helps debug missing pricing_items)
+                unmatched_skus = [sku for sku in unique_skus if sku not in pricing_by_sku]
+                if unmatched_skus:
+                    print(f"[Bluebeam Fresh] ⚠️ {len(unmatched_skus)} suggested SKUs NOT found in pricing_items:", flush=True)
+                    for sku in unmatched_skus:
+                        # Find which subject uses this SKU
+                        subjects_using_sku = [subj for subj, m in mapping_dict.items() if m.get('suggested_sku') == sku]
+                        print(f"   - SKU '{sku}' (used by: {', '.join(subjects_using_sku)})", flush=True)
+
+                    # Attempt partial match fallback for unmatched SKUs
+                    print(f"[Bluebeam Fresh] Attempting partial SKU matches...", flush=True)
+                    for sku in unmatched_skus:
+                        # Try matching the first part of the SKU (before first dash)
+                        sku_prefix = sku.split('-')[0] if '-' in sku else sku[:4]
+                        partial_items = supabase_request('GET',
+                            f'pricing_items?sku=ilike.%{sku_prefix}%&active=eq.true&trade=eq.siding&select=id,sku&limit=1')
+                        if partial_items and len(partial_items) > 0:
+                            matched_item = partial_items[0]
+                            pricing_by_sku[sku] = matched_item['id']
+                            print(f"   ✓ Partial match: '{sku}' → '{matched_item['sku']}' (id: {matched_item['id']})", flush=True)
             else:
                 print("[Bluebeam Fresh] No pricing_items found for suggested SKUs", flush=True)
         else:
@@ -1359,9 +1380,10 @@ def import_bluebeam_fresh(
         soffit_sf = detection_summary.get('soffit', {}).get('total_sf', 0)
 
         # Build totals record - ONLY include columns that exist on extraction_job_totals table
+        # NOTE: siding_squares is a GENERATED column (total_net_siding_sf / 100) - do NOT include it
         # Schema: job_id, elevation_count, total_windows, total_doors, total_garages, total_gables,
         #         total_gross_facade_sf, total_openings_sf, total_net_siding_sf, total_gable_sf,
-        #         total_roof_sf, siding_squares, outside_corners_count, inside_corners_count,
+        #         total_roof_sf, outside_corners_count, inside_corners_count,
         #         outside_corners_lf, inside_corners_lf, corner_source, detection_counts_by_class,
         #         calculation_version, calculated_at
         job_totals = {
@@ -1380,7 +1402,7 @@ def import_bluebeam_fresh(
             'inside_corners_count': inside_corners,
             'outside_corners_lf': 0,  # Not available from Bluebeam count markups
             'inside_corners_lf': 0,   # Not available from Bluebeam count markups
-            'siding_squares': round(net_siding_sf / 100, 2),  # SF to squares
+            # siding_squares is GENERATED - do not set it
             'calculation_version': 'bluebeam_import_v1',
             'corner_source': 'bluebeam_markup',
             'detection_counts_by_class': detection_summary,
