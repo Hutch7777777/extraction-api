@@ -876,7 +876,8 @@ def parse_page_annotations(
     page_record: Dict,
     page_index: int,
     subject_class_map: Dict[str, str] = None,
-    mapping_dict: Dict[str, Dict] = None
+    mapping_dict: Dict[str, Dict] = None,
+    pricing_by_sku: Dict[str, str] = None
 ) -> List[Dict]:
     """
     Extract all annotations from a PDF page.
@@ -891,6 +892,7 @@ def parse_page_annotations(
                            annotation is skipped.
         mapping_dict: Dict of bluebeam_subject_mappings keyed by bluebeam_subject.
                       Used for DB-driven class determination and material assignment.
+        pricing_by_sku: Dict mapping SKU → pricing_items.id for material assignment.
     """
     detections = []
     page_id = page_record['id']
@@ -933,7 +935,9 @@ def parse_page_annotations(
 
         # Look up subject in bluebeam_subject_mappings (for class + material)
         db_mapping = mapping_dict.get(annot_subject) if mapping_dict and annot_subject else None
-        assigned_material_id = db_mapping.get('suggested_product_id') if db_mapping else None
+        # Resolve suggested_sku → pricing_items.id (downstream n8n joins against pricing_items, not product_catalog)
+        sku = db_mapping.get('suggested_sku') if db_mapping else None
+        assigned_material_id = pricing_by_sku.get(sku) if sku and pricing_by_sku else None
 
         # Determine detection class using priority:
         # 1. Frontend subject_class_map (user override from UI)
@@ -1001,7 +1005,7 @@ def parse_page_annotations(
                 'status': 'complete',
                 'marker_label': annot_subject if annot_subject else None,  # Store original Bluebeam subject
                 'bluebeam_content': annot_subject if annot_subject else None,  # Store subject name for takeoff grouping
-                'assigned_material_id': assigned_material_id,  # From bluebeam_subject_mappings.suggested_product_id
+                'assigned_material_id': assigned_material_id,  # pricing_items.id resolved from suggested_sku
             })
 
             # Parse Bluebeam content field for real measurement values
@@ -1077,6 +1081,22 @@ def import_bluebeam_fresh(
             print(f"[Bluebeam Fresh] Loaded {len(mapping_dict)} subject mappings", flush=True)
         else:
             print("[Bluebeam Fresh] No subject mappings found, will use keyword fallback", flush=True)
+
+        # Load pricing_items by SKU to resolve suggested_sku → pricing_items.id
+        # The downstream n8n "Query Assigned Materials" joins against pricing_items, not product_catalog
+        pricing_by_sku = {}
+        all_skus = [m.get('suggested_sku') for m in mapping_dict.values() if m.get('suggested_sku')]
+        if all_skus:
+            unique_skus = list(set(all_skus))
+            sku_filter = ','.join(f'"{s}"' for s in unique_skus)
+            pricing_items = supabase_request('GET', f'pricing_items?sku=in.({sku_filter})&active=eq.true&select=id,sku')
+            if pricing_items:
+                pricing_by_sku = {p['sku']: p['id'] for p in pricing_items}
+                print(f"[Bluebeam Fresh] Loaded {len(pricing_by_sku)} pricing_items for SKU lookup", flush=True)
+            else:
+                print("[Bluebeam Fresh] No pricing_items found for suggested SKUs", flush=True)
+        else:
+            print("[Bluebeam Fresh] No suggested_sku values in mappings", flush=True)
 
         # 1. Create extraction job
         job_data = {
@@ -1159,7 +1179,7 @@ def import_bluebeam_fresh(
                 })
                 continue
 
-            detections = parse_page_annotations(pdf_page, page_record, page_num, subject_class_map, mapping_dict)
+            detections = parse_page_annotations(pdf_page, page_record, page_num, subject_class_map, mapping_dict, pricing_by_sku)
             all_detections.extend(detections)
 
             # Auto-classify page based on annotation content
