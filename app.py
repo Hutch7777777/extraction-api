@@ -2112,6 +2112,7 @@ def import_bluebeam_fresh_endpoint():
     project_name = request.form.get('project_name', '')
     organization_id = request.form.get('organization_id', '')
     class_mapping_str = request.form.get('class_mapping', '')
+    bluebeam_project_id = request.form.get('bluebeam_project_id', '')
 
     if not project_id:
         return jsonify({'success': False, 'error': 'project_id is required'}), 400
@@ -2148,7 +2149,8 @@ def import_bluebeam_fresh_endpoint():
             project_id=project_id,
             project_name=project_name or None,
             organization_id=organization_id or None,
-            subject_class_map=subject_class_map
+            subject_class_map=subject_class_map,
+            bluebeam_project_id=bluebeam_project_id or None
         )
 
         if result.get('success'):

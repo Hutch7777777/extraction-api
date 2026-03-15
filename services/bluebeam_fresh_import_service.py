@@ -138,9 +138,68 @@ SKIP_SUBJECTS = [
 ]
 
 
+def get_class_from_mapping(mapping: Optional[Dict]) -> Optional[str]:
+    """
+    Determine detection class from bluebeam_subject_mappings record.
+
+    Uses material_category + sub_category to determine the appropriate
+    detection class for the takeoff system.
+
+    Args:
+        mapping: A bluebeam_subject_mappings record dict, or None
+
+    Returns:
+        Detection class name, or None if no mapping/no match
+    """
+    if not mapping:
+        return None
+
+    cat = mapping.get('material_category', '') or ''
+    sub = mapping.get('sub_category', '') or ''
+
+    # Siding types
+    if cat in ('lap_siding', 'panel_siding'):
+        return 'siding'
+
+    # Corner types (check sub_category first)
+    if sub == 'outside_corner':
+        return 'corner_outside'
+    if sub == 'inside_corner':
+        return 'corner_inside'
+
+    # Decorative elements
+    if sub == 'decorative':
+        return 'corbel'
+
+    # Accessories by sub_category
+    if cat == 'accessories':
+        if sub == 'flashing':
+            return 'flashing'
+        if sub == 'wrb':
+            return 'wrb'
+        if sub == 'vent':
+            return 'vent'
+
+    # Direct category mappings
+    if cat == 'soffit':
+        return 'soffit'
+    if cat == 'deduction':
+        return 'deduction'
+    if cat == 'trim':
+        return 'trim'
+
+    # Openings
+    if cat == 'opening':
+        return 'window' if sub == 'window' else 'door'
+
+    return None
+
+
 def suggest_class_from_subject(subject: str) -> str:
     """
     Suggest a detection class based on the Bluebeam subject using keyword matching.
+
+    This is the FALLBACK when no bluebeam_subject_mappings record exists.
 
     Args:
         subject: The annotation subject string from Bluebeam
@@ -808,7 +867,13 @@ def parse_stamp_annotation(annot, scale_x: float, scale_y: float, page_record: D
     }
 
 
-def parse_page_annotations(pdf_page, page_record: Dict, page_index: int, subject_class_map: Dict[str, str] = None) -> List[Dict]:
+def parse_page_annotations(
+    pdf_page,
+    page_record: Dict,
+    page_index: int,
+    subject_class_map: Dict[str, str] = None,
+    mapping_dict: Dict[str, Dict] = None
+) -> List[Dict]:
     """
     Extract all annotations from a PDF page.
     Handles: rectangles, polygons, polylines, points/stamps.
@@ -817,8 +882,11 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int, subject
         pdf_page: PyMuPDF page object
         page_record: Page record dict with id, job_id, dimensions
         page_index: Zero-based page index
-        subject_class_map: Optional mapping of Bluebeam subjects to class names.
-                           If a subject maps to 'SKIP', the annotation is skipped.
+        subject_class_map: Optional mapping of Bluebeam subjects to class names
+                           (from frontend UI). If a subject maps to 'SKIP', the
+                           annotation is skipped.
+        mapping_dict: Dict of bluebeam_subject_mappings keyed by bluebeam_subject.
+                      Used for DB-driven class determination and material assignment.
     """
     detections = []
     page_id = page_record['id']
@@ -859,8 +927,17 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int, subject
         except:
             pass
 
-        # If subject_class_map is provided, use it to determine class
+        # Look up subject in bluebeam_subject_mappings (for class + material)
+        db_mapping = mapping_dict.get(annot_subject) if mapping_dict and annot_subject else None
+        assigned_material_id = db_mapping.get('suggested_product_id') if db_mapping else None
+
+        # Determine detection class using priority:
+        # 1. Frontend subject_class_map (user override from UI)
+        # 2. DB mapping via get_class_from_mapping()
+        # 3. Fallback to keyword-based infer_class()
         det_class = None
+
+        # Priority 1: Frontend UI mapping (allows user to override/skip)
         if subject_class_map and annot_subject:
             mapped_class = subject_class_map.get(annot_subject)
             if mapped_class == 'SKIP':
@@ -869,7 +946,11 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int, subject
             elif mapped_class:
                 det_class = mapped_class
 
-        # Fallback to inference if no mapping
+        # Priority 2: Database mapping from bluebeam_subject_mappings
+        if det_class is None and db_mapping:
+            det_class = get_class_from_mapping(db_mapping)
+
+        # Priority 3: Fallback to keyword inference
         if det_class is None:
             det_class = infer_class(annot)
 
@@ -915,7 +996,8 @@ def parse_page_annotations(pdf_page, page_record: Dict, page_index: int, subject
                 'is_deleted': False,
                 'status': 'complete',
                 'marker_label': annot_subject if annot_subject else None,  # Store original Bluebeam subject
-                'bluebeam_content': annot_content if annot_content else None,
+                'bluebeam_content': annot_subject if annot_subject else None,  # Store subject name for takeoff grouping
+                'assigned_material_id': assigned_material_id,  # From bluebeam_subject_mappings.suggested_product_id
             })
 
             # Parse Bluebeam content field for real measurement values
@@ -942,7 +1024,8 @@ def import_bluebeam_fresh(
     project_id: str,
     project_name: str = None,
     organization_id: str = None,
-    subject_class_map: Dict[str, str] = None
+    subject_class_map: Dict[str, str] = None,
+    bluebeam_project_id: str = None
 ) -> Dict[str, Any]:
     """
     Full fresh import: PDF → job + pages + detections.
@@ -955,6 +1038,8 @@ def import_bluebeam_fresh(
         organization_id: Optional organization ID for multi-tenant
         subject_class_map: Optional mapping of Bluebeam subjects to class names.
                            If a subject maps to 'SKIP', the annotation is skipped.
+        bluebeam_project_id: Optional UUID of bluebeam_projects record to link.
+                             If provided, updates bluebeam_projects.cad_extraction_id.
 
     Returns:
         Dict with:
@@ -975,6 +1060,20 @@ def import_bluebeam_fresh(
     print(f"[Bluebeam Fresh] Starting fresh import for project {project_id}", flush=True)
 
     try:
+        # 0. Load bluebeam_subject_mappings from database (one query for all subjects)
+        # This provides class mapping and material assignment for each Bluebeam subject
+        print("[Bluebeam Fresh] Loading bluebeam_subject_mappings...", flush=True)
+        mappings_raw = supabase_request('GET', 'bluebeam_subject_mappings?active=eq.true')
+        mapping_dict = {}
+        if mappings_raw:
+            for m in mappings_raw:
+                subject = m.get('bluebeam_subject')
+                if subject:
+                    mapping_dict[subject] = m
+            print(f"[Bluebeam Fresh] Loaded {len(mapping_dict)} subject mappings", flush=True)
+        else:
+            print("[Bluebeam Fresh] No subject mappings found, will use keyword fallback", flush=True)
+
         # 1. Create extraction job
         job_data = {
             'project_id': project_id,
@@ -992,6 +1091,18 @@ def import_bluebeam_fresh(
 
         job_id = job['id']
         print(f"[Bluebeam Fresh] Created job {job_id}", flush=True)
+
+        # 1b. Link bluebeam_projects.cad_extraction_id if bluebeam_project_id provided
+        if bluebeam_project_id:
+            link_result = supabase_request(
+                'PATCH',
+                f'bluebeam_projects?id=eq.{bluebeam_project_id}',
+                {'cad_extraction_id': job_id}
+            )
+            if link_result:
+                print(f"[Bluebeam Fresh] Linked bluebeam_project {bluebeam_project_id} → job {job_id}", flush=True)
+            else:
+                print(f"[Bluebeam Fresh] Warning: Failed to link bluebeam_project {bluebeam_project_id}", flush=True)
 
         # 2. Open PDF with PyMuPDF
         doc = fitz.open(stream=pdf_bytes, filetype='pdf')
@@ -1044,7 +1155,7 @@ def import_bluebeam_fresh(
                 })
                 continue
 
-            detections = parse_page_annotations(pdf_page, page_record, page_num, subject_class_map)
+            detections = parse_page_annotations(pdf_page, page_record, page_num, subject_class_map, mapping_dict)
             all_detections.extend(detections)
 
             # Auto-classify page based on annotation content
