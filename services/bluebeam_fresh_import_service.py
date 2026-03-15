@@ -1280,11 +1280,15 @@ def import_bluebeam_fresh(
         roof_sf = detection_summary.get('roof', {}).get('total_sf', 0)
         soffit_sf = detection_summary.get('soffit', {}).get('total_sf', 0)
 
-        # Build totals record
+        # Build totals record - ONLY include columns that exist on extraction_job_totals table
+        # Schema: job_id, elevation_count, total_windows, total_doors, total_garages, total_gables,
+        #         total_gross_facade_sf, total_openings_sf, total_net_siding_sf, total_gable_sf,
+        #         total_roof_sf, siding_squares, outside_corners_count, inside_corners_count,
+        #         outside_corners_lf, inside_corners_lf, corner_source, detection_counts_by_class,
+        #         calculation_version, calculated_at
         job_totals = {
             'job_id': job_id,
             'elevation_count': elevation_count,
-            'elevations_processed': elevation_count,
             'total_gross_facade_sf': round(siding_sf, 2),
             'total_openings_sf': round(deduction_sf, 2),
             'total_net_siding_sf': round(net_siding_sf, 2),
@@ -1296,31 +1300,27 @@ def import_bluebeam_fresh(
             'total_roof_sf': round(roof_sf, 2),
             'outside_corners_count': outside_corners,
             'inside_corners_count': inside_corners,
+            'outside_corners_lf': 0,  # Not available from Bluebeam count markups
+            'inside_corners_lf': 0,   # Not available from Bluebeam count markups
             'siding_squares': round(net_siding_sf / 100, 2),  # SF to squares
             'calculation_version': 'bluebeam_import_v1',
             'corner_source': 'bluebeam_markup',
             'detection_counts_by_class': detection_summary,
-            # LF values - set to 0 as Bluebeam count markups don't provide these
-            'total_window_head_lf': 0,
-            'total_window_jamb_lf': 0,
-            'total_window_sill_lf': 0,
-            'total_window_perimeter_lf': 0,
-            'total_door_head_lf': 0,
-            'total_door_jamb_lf': 0,
-            'total_door_perimeter_lf': 0,
-            'total_garage_head_lf': 0,
-            'total_gable_rake_lf': 0,
-            'total_roof_eave_lf': 0,
-            'outside_corners_lf': 0,
-            'inside_corners_lf': 0,
+            'calculated_at': datetime.now(timezone.utc).isoformat(),
         }
 
-        # Insert totals record
-        totals_result = supabase_request('POST', 'extraction_job_totals', job_totals)
-        if totals_result:
-            print(f"[Bluebeam Fresh] Created extraction_job_totals: {net_siding_sf:.0f} net SF, {outside_corners} O/S corners, {inside_corners} I/S corners", flush=True)
-        else:
-            print(f"[Bluebeam Fresh] Warning: Failed to create extraction_job_totals", flush=True)
+        # Insert totals record with detailed logging
+        print(f"[Bluebeam Fresh] Inserting extraction_job_totals: {job_totals}", flush=True)
+        try:
+            totals_result = supabase_request('POST', 'extraction_job_totals', job_totals)
+            if totals_result:
+                print(f"[Bluebeam Fresh] Created extraction_job_totals: {net_siding_sf:.0f} net SF, {outside_corners} O/S corners, {inside_corners} I/S corners", flush=True)
+            else:
+                print(f"[Bluebeam Fresh] WARNING: extraction_job_totals INSERT returned None/empty", flush=True)
+        except Exception as totals_err:
+            print(f"[Bluebeam Fresh] ERROR inserting extraction_job_totals: {totals_err}", flush=True)
+            import traceback
+            traceback.print_exc()
 
         # 8. Update job status to 'complete' (ready for Detection Editor)
         update_job(job_id, {
