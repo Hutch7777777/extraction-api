@@ -1246,6 +1246,82 @@ def import_bluebeam_fresh(
             detection_summary[cls]['total_sf'] = round(detection_summary[cls]['total_sf'], 2)
             detection_summary[cls]['total_lf'] = round(detection_summary[cls]['total_lf'], 2)
 
+        # 7b. Calculate and insert extraction_job_totals (required for Approve button)
+        # Aggregate item_count by class (for corners, flashing counts, etc.)
+        item_counts_by_class = {}
+        for det in all_detections:
+            cls = det.get('class', 'unknown')
+            item_count = det.get('item_count') or 0
+            if cls not in item_counts_by_class:
+                item_counts_by_class[cls] = 0
+            item_counts_by_class[cls] += item_count
+
+        # Calculate totals for extraction_job_totals
+        # Siding SF = all siding-type area_sf values
+        siding_sf = detection_summary.get('siding', {}).get('total_sf', 0)
+        # Deductions = opening deductions
+        deduction_sf = detection_summary.get('deduction', {}).get('total_sf', 0)
+        # Net siding = gross siding - deductions
+        net_siding_sf = max(0, siding_sf - deduction_sf)
+
+        # Corner counts from item_count aggregation
+        outside_corners = item_counts_by_class.get('corner_outside', 0)
+        inside_corners = item_counts_by_class.get('corner_inside', 0)
+
+        # Window/door/garage counts from flashing item_counts
+        # (Bluebeam uses "Window Head Flashing Count" etc. which map to 'flashing' class)
+        # For now, estimate from flashing counts or detection counts
+        window_count = item_counts_by_class.get('window', 0)
+        door_count = item_counts_by_class.get('door', 0)
+        garage_count = item_counts_by_class.get('garage', 0)
+
+        # Gable and roof SF
+        gable_sf = detection_summary.get('gable', {}).get('total_sf', 0)
+        roof_sf = detection_summary.get('roof', {}).get('total_sf', 0)
+        soffit_sf = detection_summary.get('soffit', {}).get('total_sf', 0)
+
+        # Build totals record
+        job_totals = {
+            'job_id': job_id,
+            'elevation_count': elevation_count,
+            'elevations_processed': elevation_count,
+            'total_gross_facade_sf': round(siding_sf, 2),
+            'total_openings_sf': round(deduction_sf, 2),
+            'total_net_siding_sf': round(net_siding_sf, 2),
+            'total_windows': window_count,
+            'total_doors': door_count,
+            'total_garages': garage_count,
+            'total_gables': detection_summary.get('gable', {}).get('count', 0),
+            'total_gable_sf': round(gable_sf, 2),
+            'total_roof_sf': round(roof_sf, 2),
+            'outside_corners_count': outside_corners,
+            'inside_corners_count': inside_corners,
+            'siding_squares': round(net_siding_sf / 100, 2),  # SF to squares
+            'calculation_version': 'bluebeam_import_v1',
+            'corner_source': 'bluebeam_markup',
+            'detection_counts_by_class': detection_summary,
+            # LF values - set to 0 as Bluebeam count markups don't provide these
+            'total_window_head_lf': 0,
+            'total_window_jamb_lf': 0,
+            'total_window_sill_lf': 0,
+            'total_window_perimeter_lf': 0,
+            'total_door_head_lf': 0,
+            'total_door_jamb_lf': 0,
+            'total_door_perimeter_lf': 0,
+            'total_garage_head_lf': 0,
+            'total_gable_rake_lf': 0,
+            'total_roof_eave_lf': 0,
+            'outside_corners_lf': 0,
+            'inside_corners_lf': 0,
+        }
+
+        # Insert totals record
+        totals_result = supabase_request('POST', 'extraction_job_totals', job_totals)
+        if totals_result:
+            print(f"[Bluebeam Fresh] Created extraction_job_totals: {net_siding_sf:.0f} net SF, {outside_corners} O/S corners, {inside_corners} I/S corners", flush=True)
+        else:
+            print(f"[Bluebeam Fresh] Warning: Failed to create extraction_job_totals", flush=True)
+
         # 8. Update job status to 'complete' (ready for Detection Editor)
         update_job(job_id, {
             'status': 'complete',
