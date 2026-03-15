@@ -141,6 +141,58 @@ SKIP_SUBJECTS = [
     'legend',
 ]
 
+# =============================================================================
+# NOISE FILTER - Non-construction annotations (electrical, utility, revisions)
+# =============================================================================
+
+# Known noise subjects (electrical, utility, revision marks)
+# These are symbols commonly found on architectural plans that aren't siding-related
+NOISE_SUBJECTS = frozenset({
+    'GFCI', 'CATV', 'DATA', 'CH', 'D', 'G', 'M', 'S', 'T', 'DC', 'W.P.',
+    'WP', 'GFI', 'TEL', 'PHONE', 'ELEC', 'MECH', 'PLMB', 'FD', 'FE',
+    'SD', 'SM', 'SS', 'WH', 'DW', 'REF', 'MW', 'OV', 'RNG', 'HB',
+})
+
+# Regex patterns for noise annotations
+NOISE_PATTERNS = [
+    re.compile(r'^UPDATED\s', re.IGNORECASE),     # "UPDATED 23-NOV-2022" revision marks
+    re.compile(r'^REV\s', re.IGNORECASE),          # Revision marks
+    re.compile(r'^[A-Z]{1,2}$'),                    # Single/double letter codes (D, G, WP, etc.)
+    re.compile(r'^NOTE\b', re.IGNORECASE),          # Note annotations
+    re.compile(r'^LEGEND\b', re.IGNORECASE),        # Legend labels
+    re.compile(r'^\d{1,2}/\d{1,2}/\d{2,4}$'),       # Date stamps (11/23/22)
+]
+
+
+def is_noise_annotation(subject: str) -> bool:
+    """
+    Check if a Bluebeam subject is a non-construction annotation that should be filtered.
+
+    These are electrical symbols, utility markers, revision marks, etc. that appear on
+    architectural plans but aren't relevant to siding takeoffs.
+
+    Args:
+        subject: The annotation subject string from Bluebeam
+
+    Returns:
+        True if this is a noise annotation that should be filtered
+    """
+    if not subject or not subject.strip():
+        return False  # Empty subjects handled elsewhere
+
+    cleaned = subject.strip().upper()
+
+    # Check exact matches first (electrical symbols)
+    if cleaned in NOISE_SUBJECTS:
+        return True
+
+    # Check regex patterns
+    for pattern in NOISE_PATTERNS:
+        if pattern.match(subject.strip()):
+            return True
+
+    return False
+
 
 def get_class_from_mapping(mapping: Optional[Dict]) -> Optional[str]:
     """
@@ -220,7 +272,13 @@ def suggest_class_from_subject(subject: str) -> str:
     if subject_lower.startswith('(no subject'):
         return 'unknown'
 
-    # Check keyword matches FIRST (longer matches first for specificity)
+    # Check for noise annotations FIRST (electrical symbols, revision marks, etc.)
+    # These should be classified as 'other' to keep them out of siding routing
+    # but still stored for audit trail
+    if is_noise_annotation(subject):
+        return 'other'
+
+    # Check keyword matches (longer matches first for specificity)
     # This ensures "Trim Count" matches "trim" before checking skip patterns
     for class_name, keywords in SUBJECT_KEYWORDS.items():
         for keyword in sorted(keywords, key=len, reverse=True):
