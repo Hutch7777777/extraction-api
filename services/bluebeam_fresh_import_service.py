@@ -99,6 +99,9 @@ COLOR_TO_CLASS = {
 }
 
 # Keyword-based class suggestion for Bluebeam subjects
+# NOTE: Keywords are matched in order within each class - longer/more specific first
+# IMPORTANT: 'corner' alone is too generic (matches I/S Corner wrong), so use explicit variants
+# IMPORTANT: 'deduct' should map to deduction class, not window!
 SUBJECT_KEYWORDS = {
     'siding': ['lap siding', 'board & batten', 'board and batten', 'shingle siding',
                'panel siding', 'fiber cement panel', 'shake siding', 'horizontal siding',
@@ -111,11 +114,12 @@ SUBJECT_KEYWORDS = {
     'gutter': ['gutter'],
     'downspout': ['downspout'],
     'wrb': ['wrb', 'house wrap', 'weather barrier'],
-    'window': ['window', 'lap deduct', 'deduct'],
+    'deduction': ['lap deduct', 'panel deduct', 'window deduct', 'deduct'],  # Deductions, NOT windows
+    'window': ['window'],  # Removed 'deduct' keywords - they belong to deduction class
     'door': ['door', 'sgd', 'swing'],
     'garage': ['garage door', 'garage'],
-    'corner_outside': ['outside corner', 'corner'],
-    'corner_inside': ['inside corner'],
+    'corner_inside': ['i/s corner', 'inside corner', 'is corner'],  # Check BEFORE corner_outside
+    'corner_outside': ['o/s corner', 'outside corner', 'os corner'],  # Removed generic 'corner'
     'belly_band': ['belly band'],
     'column': ['column'],
     'post': ['post'],
