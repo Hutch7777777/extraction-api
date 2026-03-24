@@ -25,6 +25,7 @@ except ImportError:
 from config import config
 from database import supabase_request, upload_to_storage
 from utils.scale import get_safe_scale_ratio
+from geometry.area import compute_detection_area_sf, compute_detection_perimeter_lf
 
 
 # Detection class categorization for measurement types
@@ -333,6 +334,8 @@ def calculate_detection_measurement(
     """
     Calculate the real-world measurement for a detection from pixel coordinates.
 
+    Uses shared compute_detection_area_sf for consistent Shoelace/bbox logic.
+
     Args:
         detection: Detection dict with pixel_x, pixel_y, pixel_width, pixel_height, polygon_points
         scale_ratio: Pixels per foot (from extraction_pages.scale_ratio)
@@ -344,25 +347,22 @@ def calculate_detection_measurement(
     # Normalize: lowercase and handle both space and underscore variants
     det_class_normalized = det_class.lower()
 
-    # Get pixel dimensions
+    # Get pixel dimensions for linear fallback
     pixel_w = float(detection.get('pixel_width', 0) or 0)
     pixel_h = float(detection.get('pixel_height', 0) or 0)
-    polygon_points = detection.get('polygon_points')
 
     unit, intent = get_measurement_type(det_class)
 
     # Calculate based on class type
     if det_class_normalized in AREA_CLASSES or det_class_normalized.replace(' ', '_') in AREA_CLASSES:
-        # For area classes, prefer polygon area if available
-        if polygon_points:
-            value = calculate_polygon_area_sqft(polygon_points, scale_ratio)
-        else:
-            value = calculate_area_sqft(pixel_w, pixel_h, scale_ratio)
+        # Use shared area function (prefers Shoelace on polygon_points, falls back to bbox)
+        value = compute_detection_area_sf(detection, scale_ratio)
 
     elif det_class_normalized in LINEAR_CLASSES or det_class_normalized.replace(' ', '_') in LINEAR_CLASSES:
-        # For linear classes, calculate from polygon perimeter or use height as primary
+        # For linear classes, use shared perimeter function or longest dimension
+        polygon_points = detection.get('polygon_points')
         if polygon_points:
-            value = calculate_polygon_perimeter_lf(polygon_points, scale_ratio)
+            value = compute_detection_perimeter_lf(detection, scale_ratio)
         else:
             # For linear elements like fascia, trim, use the longer dimension
             value = pixels_to_feet(max(pixel_w, pixel_h), scale_ratio)

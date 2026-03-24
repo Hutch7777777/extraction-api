@@ -8,6 +8,7 @@ from database import (
 )
 from config import config
 from utils.scale import get_safe_scale_ratio, get_safe_dpi
+from geometry.area import compute_detection_area_sf, compute_detection_perimeter_lf
 
 
 def calculate_takeoff_for_page(page_id):
@@ -66,22 +67,32 @@ def calculate_takeoff_for_page(page_id):
         px_width = pred.get('width', 0)
         px_height = pred.get('height', 0)
         confidence = pred.get('confidence', 0)
-        
+
         # Calculate real dimensions
         real_width_in = px_width * inches_per_pixel
         real_height_in = px_height * inches_per_pixel
         real_width_ft = real_width_in / 12
         real_height_ft = real_height_in / 12
-        
-        # Calculate area (gables are triangles)
+
+        # Build detection dict for shared area function
+        # Note: raw_predictions use 'width'/'height', we map to pixel_width/pixel_height
+        detection_dict = {
+            'pixel_width': px_width,
+            'pixel_height': px_height,
+            'polygon_points': pred.get('polygon_points'),  # Usually None for raw predictions
+            'class': class_name
+        }
+
+        # Calculate area using shared function (prefers Shoelace on polygon_points, falls back to bbox)
+        # For gables without polygon_points, we still apply triangle factor after
         is_triangle = (class_name == 'gable')
-        if is_triangle:
-            area_sf = (real_width_in * real_height_in) / 144 / 2
-        else:
-            area_sf = (real_width_in * real_height_in) / 144
-        
-        # Calculate perimeter
-        perimeter_lf = (real_width_in * 2 + real_height_in * 2) / 12
+        area_sf = compute_detection_area_sf(detection_dict, scale_ratio)
+        if is_triangle and not pred.get('polygon_points'):
+            # Apply triangle factor for bbox-based gable calculation
+            area_sf = area_sf / 2
+
+        # Calculate perimeter using shared function
+        perimeter_lf = compute_detection_perimeter_lf(detection_dict, scale_ratio)
         
         # Store detection detail
         detail = {

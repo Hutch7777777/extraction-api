@@ -11,6 +11,7 @@ from geometry.measurements import (
     calculate_perimeter_lf
 )
 from geometry.calculations import calculate_real_measurements, calculate_real_dimensions
+from geometry.area import compute_detection_area_sf, compute_detection_perimeter_lf
 
 __all__ = [
     'parse_scale_notation', 'COMMON_SCALES',
@@ -18,5 +19,7 @@ __all__ = [
     'pixels_to_real_inches', 'pixels_to_real_feet',
     'calculate_area_sf', 'calculate_perimeter_lf',
     'calculate_real_measurements',
-    'calculate_real_dimensions'
+    'calculate_real_dimensions',
+    'compute_detection_area_sf',
+    'compute_detection_perimeter_lf'
 ]
