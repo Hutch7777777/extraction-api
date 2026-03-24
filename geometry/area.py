@@ -119,6 +119,10 @@ def _shoelace_area(points):
     """
     n = len(points)
     if n < 3:
+        logger.warning(
+            f"Degenerate polygon detected (< 3 points): "
+            f"point_count={n}, cannot compute Shoelace area"
+        )
         return 0.0
 
     area = 0.0

@@ -2,8 +2,12 @@
 Detection measurement calculations
 """
 
+import logging
+
 from config import config
 from utils.scale import get_safe_scale_ratio, get_safe_dpi
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_real_dimensions(pixel_width, pixel_height, scale_ratio, dpi=None, is_triangle=False):
@@ -100,7 +104,14 @@ def calculate_real_measurements(predictions, scale_ratio, dpi=None):
         class_name = pred.get('class', '').lower()
         width_px = pred.get('width', 0)
         height_px = pred.get('height', 0)
-        
+
+        if not width_px or not height_px:
+            logger.warning(
+                f"Detection missing dimensions: class={class_name}, "
+                f"width={width_px}, height={height_px}, "
+                f"confidence={pred.get('confidence', 'N/A')}"
+            )
+
         width_inches = width_px * real_inches_per_pixel
         height_inches = height_px * real_inches_per_pixel
         area_sqft = width_px * height_px * sqft_per_sq_pixel

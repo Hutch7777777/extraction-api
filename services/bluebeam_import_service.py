@@ -14,10 +14,13 @@ Key features:
 
 import io
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple
+
+logger = logging.getLogger(__name__)
 
 try:
     import fitz  # PyMuPDF
@@ -179,6 +182,14 @@ def transform_pdf_to_pixel(
     Returns:
         Dict with center-based pixel coordinates (pixel_x, pixel_y, pixel_width, pixel_height)
     """
+    # Guard against invalid PDF dimensions
+    if not pdf_page_rect.width or pdf_page_rect.width <= 0 or not pdf_page_rect.height or pdf_page_rect.height <= 0:
+        logger.warning(
+            f"Invalid PDF page dimensions: width={pdf_page_rect.width}, height={pdf_page_rect.height}, "
+            f"returning zero-sized detection"
+        )
+        return {'pixel_x': 0, 'pixel_y': 0, 'pixel_width': 0, 'pixel_height': 0}
+
     # Calculate scale factors (reverse of export)
     scale_x = image_width / pdf_page_rect.width
     scale_y = image_height / pdf_page_rect.height

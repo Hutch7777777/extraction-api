@@ -9,6 +9,7 @@ Changes in this version:
 """
 
 import io
+import logging
 import math
 import requests
 from io import BytesIO
@@ -16,6 +17,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from config import config
 from utils.scale import get_safe_scale_ratio, get_safe_dpi
+
+logger = logging.getLogger(__name__)
 from database import (
     get_page, update_page, get_elevation_pages,
     upload_to_storage, supabase_request
@@ -246,7 +249,14 @@ def generate_markup_image(image_data, predictions, scale_ratio, dpi=None,
         y = pred.get('y', 0)
         width = pred.get('width', 0)
         height = pred.get('height', 0)
-        
+
+        if not width or not height:
+            logger.warning(
+                f"Detection missing dimensions: class={class_name}, "
+                f"width={width}, height={height}, "
+                f"confidence={pred.get('confidence', 'N/A')}"
+            )
+
         # Calculate bounding box
         x1 = int(x - width / 2)
         y1 = int(y - height / 2)

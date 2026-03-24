@@ -2,27 +2,36 @@
 Validation utilities
 """
 
+import logging
+
 from config import config
 
+logger = logging.getLogger(__name__)
 
-def normalize_page_type(raw_type):
+
+def normalize_page_type(raw_type, page_id=None):
     """
     Normalize page type to valid enum value.
-    
+
     Args:
         raw_type: Raw page type string from Claude
-    
+        page_id: Optional page ID for logging context
+
     Returns:
         Normalized page type string
     """
     if not raw_type or not isinstance(raw_type, str):
-        return 'other'
-    
+        logger.warning(
+            f"Page classification failed for page {page_id or 'unknown'}, "
+            f"raw_type={raw_type!r}, defaulting to 'unknown'"
+        )
+        return 'unknown'
+
     cleaned = raw_type.lower().strip()
-    
+
     if cleaned in config.VALID_PAGE_TYPES:
         return cleaned
-    
+
     mappings = {
         'floorplan': 'floor_plan',
         'floor plan': 'floor_plan',
@@ -31,12 +40,20 @@ def normalize_page_type(raw_type):
         'roofplan': 'roof_plan',
         'roof plan': 'roof_plan',
         'roof': 'roof_plan',
-        'unknown': 'other',
         'title': 'cover',
         'title sheet': 'cover',
+        'other': 'unknown',  # Map old 'other' to 'unknown'
     }
-    
-    return mappings.get(cleaned, 'other')
+
+    result = mappings.get(cleaned)
+    if result:
+        return result
+
+    logger.warning(
+        f"Unrecognized page type '{raw_type}' for page {page_id or 'unknown'}, "
+        f"defaulting to 'unknown'"
+    )
+    return 'unknown'
 
 
 def validate_job_id(job_id):

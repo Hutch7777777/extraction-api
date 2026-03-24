@@ -2,6 +2,7 @@
 Takeoff calculation service
 """
 
+import logging
 import math
 from database import (
     get_page, get_elevation_pages, supabase_request
@@ -9,6 +10,8 @@ from database import (
 from config import config
 from utils.scale import get_safe_scale_ratio, get_safe_dpi
 from geometry.area import compute_detection_area_sf, compute_detection_perimeter_lf
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_takeoff_for_page(page_id):
@@ -67,6 +70,13 @@ def calculate_takeoff_for_page(page_id):
         px_width = pred.get('width', 0)
         px_height = pred.get('height', 0)
         confidence = pred.get('confidence', 0)
+
+        if not px_width or not px_height:
+            logger.warning(
+                f"Detection missing dimensions: class={class_name}, "
+                f"width={px_width}, height={px_height}, "
+                f"confidence={confidence}"
+            )
 
         # Calculate real dimensions
         real_width_in = px_width * inches_per_pixel

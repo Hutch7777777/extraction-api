@@ -9,8 +9,11 @@ Filters and cleans Roboflow predictions before database insertion:
 5. Containment filtering - drop smaller detections fully inside larger ones
 """
 
+import logging
 from typing import List, Dict, Any, Tuple
 from config import config
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_iou(box1: Dict, box2: Dict) -> float:
@@ -129,6 +132,13 @@ def filter_by_size(predictions: List[Dict], min_sizes: Dict) -> Tuple[List[Dict]
 
         width = pred.get('width', 0)
         height = pred.get('height', 0)
+
+        if not width or not height:
+            logger.warning(
+                f"Detection missing dimensions: class={cls}, "
+                f"width={width}, height={height}, "
+                f"confidence={pred.get('confidence', 'N/A')}"
+            )
 
         if width >= min_size['width'] and height >= min_size['height']:
             kept.append(pred)

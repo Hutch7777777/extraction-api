@@ -2,6 +2,8 @@
 Extraction service - main processing orchestration
 """
 
+import logging
+
 from database import (
     get_job, update_job, update_page,
     get_classified_pages, get_elevation_pages, get_schedule_pages,
@@ -14,6 +16,8 @@ from services.detection_postprocess import postprocess_detections
 from config import config
 from utils.scale import get_safe_scale_ratio, get_safe_dpi
 import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
@@ -32,7 +36,8 @@ def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
     
     # Calculate pixels to real units conversion
     # At 200 DPI and 1/4"=1' (scale_ratio=48): 1 pixel = 0.24 inches real
-    inches_per_pixel = scale_ratio / dpi
+    safe_dpi = get_safe_dpi(dpi, context="insert_detections")
+    inches_per_pixel = scale_ratio / safe_dpi
     
     inserted = 0
     for idx, pred in enumerate(predictions):
@@ -44,7 +49,14 @@ def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
         pixel_width = pred.get('width', 0)
         pixel_height = pred.get('height', 0)
         confidence = pred.get('confidence', 1.0)
-        
+
+        if not pixel_width or not pixel_height:
+            logger.warning(
+                f"Detection missing dimensions: class={detection_class}, "
+                f"width={pixel_width}, height={pixel_height}, "
+                f"confidence={confidence}"
+            )
+
         # Calculate real dimensions
         real_width_in = pixel_width * inches_per_pixel
         real_height_in = pixel_height * inches_per_pixel

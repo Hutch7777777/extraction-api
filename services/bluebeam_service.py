@@ -7,9 +7,12 @@ Uses PyMuPDF (fitz) to create standard PDF annotations.
 
 import io
 import json
+import logging
 import requests
 from datetime import datetime
 from typing import Dict, List, Optional, Any
+
+logger = logging.getLogger(__name__)
 
 try:
     import fitz  # PyMuPDF
@@ -115,6 +118,10 @@ def polygon_area_pixels(points: List) -> float:
     """
     n = len(points)
     if n < 3:
+        logger.warning(
+            f"Degenerate polygon detected (< 3 points): "
+            f"point_count={n}, returning 0 area"
+        )
         return 0.0
 
     area = 0.0

@@ -2263,7 +2263,7 @@ def reenrich_materials_endpoint(job_id):
 # PAGE CLASSIFICATION ENDPOINT
 # ============================================================
 
-VALID_PAGE_TYPES = ['elevation', 'floor_plan', 'roof_plan', 'detail', 'cover', 'section', 'schedule', 'notes']
+VALID_PAGE_TYPES = ['elevation', 'floor_plan', 'roof_plan', 'detail', 'cover', 'section', 'schedule', 'notes', 'unknown', 'review_needed']
 
 @app.route('/api/pages/<page_id>/classify', methods=['PATCH'])
 def update_page_classification(page_id):

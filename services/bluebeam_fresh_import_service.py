@@ -20,11 +20,14 @@ Key features:
 """
 
 import io
+import logging
 import re
 import uuid
 import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple
+
+logger = logging.getLogger(__name__)
 
 try:
     import fitz  # PyMuPDF
@@ -677,6 +680,10 @@ def shoelace_area(vertices: List[Tuple[float, float]]) -> float:
     """Calculate polygon area using Shoelace formula."""
     n = len(vertices)
     if n < 3:
+        logger.warning(
+            f"Degenerate polygon detected (< 3 vertices): "
+            f"vertex_count={n}, returning 0 area"
+        )
         return 0
 
     area = 0
@@ -815,6 +822,11 @@ def parse_polygon_annotation(annot, scale_x: float, scale_y: float, page_record:
     """Extract true polygon vertices and calculate area."""
     vertices = annot.vertices
     if not vertices or len(vertices) < 3:
+        vertex_count = len(vertices) if vertices else 0
+        logger.warning(
+            f"Degenerate polygon annotation (< 3 vertices): "
+            f"vertex_count={vertex_count}, falling back to rect annotation"
+        )
         return parse_rect_annotation(annot, scale_x, scale_y, page_record)
 
     # Convert PDF points to pixel coordinates
@@ -965,6 +977,14 @@ def parse_page_annotations(
     pdf_rect = pdf_page.rect
     pdf_width = pdf_rect.width
     pdf_height = pdf_rect.height
+
+    # Guard against malformed PDF with zero dimensions
+    if not pdf_width or pdf_width <= 0 or not pdf_height or pdf_height <= 0:
+        logger.warning(
+            f"Invalid PDF dimensions for page {page_index + 1}: "
+            f"width={pdf_width}, height={pdf_height}, skipping annotation parsing"
+        )
+        return detections
 
     # Scale factor: PDF points → image pixels
     scale_x = page_width / pdf_width
@@ -1227,7 +1247,7 @@ def import_bluebeam_fresh(
                 'original_image_url': page_img['image_url'],
                 'original_width': page_img['width'],
                 'original_height': page_img['height'],
-                'page_type': 'elevation',  # Default; user can reclassify
+                'page_type': 'unknown',  # Default until classified by annotations or user
                 'status': 'complete',
                 'dpi': page_img.get('dpi', 150),
             }

@@ -164,7 +164,7 @@ class ClaudeClient:
             result = self._make_request(image_base64, prompt, max_tokens=500)
             
             if 'error' in result:
-                return {"page_type": "other", "confidence": 0, "error": result['error']}
+                return {"page_type": "unknown", "confidence": 0, "error": result['error']}
             
             text = result.get('content', [{}])[0].get('text', '{}')
             parsed = self._extract_json(text)
@@ -181,10 +181,10 @@ class ClaudeClient:
                 
                 return parsed
             
-            return {"page_type": "other", "confidence": 0}
-        
+            return {"page_type": "unknown", "confidence": 0}
+
         except Exception as e:
-            return {"page_type": "other", "confidence": 0, "error": str(e)}
+            return {"page_type": "unknown", "confidence": 0, "error": str(e)}
     
     def extract_schedule(self, image_url):
         """

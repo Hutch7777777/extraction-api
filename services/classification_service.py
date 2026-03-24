@@ -2,6 +2,7 @@
 Page classification service
 """
 
+import logging
 import time
 from collections import Counter
 
@@ -9,6 +10,8 @@ from config import config
 from database import update_job, update_page, get_pending_pages
 from core import classify_page_with_claude
 from utils import normalize_page_type
+
+logger = logging.getLogger(__name__)
 
 
 def classify_job_background(job_id):
@@ -43,8 +46,18 @@ def classify_job_background(job_id):
             
             # Classify with Claude
             classification = classify_page_with_claude(image_url)
-            page_type = normalize_page_type(classification.get('page_type'))
-            
+            page_type = normalize_page_type(classification.get('page_type'), page_id=page_id)
+            confidence = classification.get('confidence', 0)
+
+            # Check confidence threshold
+            if confidence < config.PAGE_CLASSIFICATION_CONFIDENCE_THRESHOLD:
+                logger.warning(
+                    f"Low confidence classification ({confidence:.2f}) for "
+                    f"page {page_id}: predicted '{page_type}', "
+                    f"downgrading to 'review_needed'"
+                )
+                page_type = 'review_needed'
+
             # Count by type
             if page_type == 'elevation':
                 elevation_count += 1
