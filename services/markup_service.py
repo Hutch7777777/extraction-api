@@ -15,6 +15,7 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 
 from config import config
+from utils.scale import get_safe_scale_ratio, get_safe_dpi
 from database import (
     get_page, update_page, get_elevation_pages,
     upload_to_storage, supabase_request
@@ -212,9 +213,8 @@ def generate_markup_image(image_data, predictions, scale_ratio, dpi=None,
     Returns:
         Tuple of (PIL Image, totals dict)
     """
-    if dpi is None:
-        dpi = config.DEFAULT_DPI
-    
+    dpi = get_safe_dpi(dpi, context="generate_markup_image")
+
     img = Image.open(BytesIO(image_data)).convert('RGB')
     draw = ImageDraw.Draw(img)
     
@@ -226,9 +226,7 @@ def generate_markup_image(image_data, predictions, scale_ratio, dpi=None,
         font = ImageFont.load_default()
         small_font = font
     
-    if not scale_ratio or scale_ratio <= 0:
-        scale_ratio = 48
-    
+    scale_ratio = get_safe_scale_ratio(scale_ratio, context="generate_markup_image")
     inches_per_pixel = (1.0 / dpi) * scale_ratio
     
     # Filter predictions if trade_filter specified
@@ -360,8 +358,8 @@ def generate_markups_for_page(page_id, trades=None):
     image_url = page.get('image_url')
     extraction_data = page.get('extraction_data', {})
     predictions = extraction_data.get('raw_predictions', [])
-    scale_ratio = float(page.get('scale_ratio') or 48)
-    dpi = int(page.get('dpi') or config.DEFAULT_DPI)
+    scale_ratio = get_safe_scale_ratio(page.get('scale_ratio'), context=f"markups page {page_id}")
+    dpi = get_safe_dpi(page.get('dpi'), context=f"markups page {page_id}")
     job_id = page.get('job_id')
     page_num = page.get('page_number')
     

@@ -24,6 +24,7 @@ except ImportError:
 
 from config import config
 from database import supabase_request, upload_to_storage
+from utils.scale import get_safe_scale_ratio
 
 
 # Detection class categorization for measurement types
@@ -71,19 +72,19 @@ SKIP_CLASSES = {'building'}
 # (already accounts for image resizing from original scan)
 # To convert: feet = pixels / scale_ratio
 
-def pixels_to_feet(pixels: float, scale_ratio: float) -> float:
+def pixels_to_feet(pixels: float, scale_ratio: float, context: str = "pixels_to_feet") -> float:
     """
     Convert pixel measurement to real-world feet.
 
     Args:
         pixels: Measurement in pixels
         scale_ratio: Pixels per foot (from extraction_pages.scale_ratio)
+        context: Context for logging if fallback is used
 
     Returns:
         Real-world measurement in feet
     """
-    if not scale_ratio or float(scale_ratio) == 0:
-        return 0.0
+    scale_ratio = get_safe_scale_ratio(scale_ratio, context=context)
     return float(pixels) / float(scale_ratio)
 
 
@@ -150,9 +151,7 @@ def calculate_polygon_area_sqft(polygon_points: List, scale_ratio: float) -> flo
     if not points or not isinstance(points, list):
         return 0.0
 
-    if not scale_ratio or float(scale_ratio) == 0:
-        return 0.0
-
+    scale_ratio = get_safe_scale_ratio(scale_ratio, context="calculate_polygon_area_sqft")
     pixel_area = polygon_area_pixels(points)
     ft_per_pixel = 1.0 / float(scale_ratio)
     return pixel_area * (ft_per_pixel ** 2)
@@ -218,7 +217,10 @@ def calculate_measure_conversion(page_data: Dict, pdf_page_width_pts: float) -> 
     Returns:
         Feet per PDF point conversion factor
     """
-    scale_ratio = float(page_data.get('scale_ratio', 0) or 0)
+    scale_ratio = get_safe_scale_ratio(
+        page_data.get('scale_ratio'),
+        context=f"bluebeam measure conversion page {page_data.get('id', 'unknown')}"
+    )
     # Try multiple field names for original image width
     original_width = float(
         page_data.get('original_width', 0) or
@@ -226,11 +228,11 @@ def calculate_measure_conversion(page_data: Dict, pdf_page_width_pts: float) -> 
         page_data.get('width', 0) or 0
     )
 
-    if not scale_ratio or not original_width or not pdf_page_width_pts:
+    if not original_width or not pdf_page_width_pts:
         # Default fallback for 1/4" = 1'-0" scale on 36" wide sheet
         # 1/4" = 1' means 1 inch = 4 feet, so ft_per_inch = 4
         # ft_per_point = 4 / 72 = 0.05556
-        print(f"[Bluebeam Export] WARNING: Using default scale conversion (1/4\"=1'-0\")", flush=True)
+        print(f"[Bluebeam Export] WARNING: Missing dimensions, using default scale conversion (1/4\"=1'-0\")", flush=True)
         return 0.05556
 
     real_width_ft = original_width / scale_ratio
@@ -692,7 +694,10 @@ def export_bluebeam_pdf(job_id: str, include_materials: bool = True) -> Dict[str
 
         # Get page scale info for real-world measurement calculations
         # scale_ratio is pixels per foot (already accounts for image resolution)
-        page_scale_ratio = float(page_data.get('scale_ratio', 0) or 0)
+        page_scale_ratio = get_safe_scale_ratio(
+            page_data.get('scale_ratio'),
+            context=f"bluebeam export page {page_number}"
+        )
 
         print(f"[Bluebeam Export] Page scale: ratio={page_scale_ratio} pixels/ft", flush=True)
 

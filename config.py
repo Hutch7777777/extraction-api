@@ -29,6 +29,7 @@ class Config:
     BATCH_DELAY_SECONDS = 0.5
     PDF_CHUNK_SIZE = 5
     DEFAULT_DPI = 200
+    DEFAULT_SCALE_RATIO = 48  # 1/4"=1' — single source of truth fallback
     
     # CORS
     CORS_ORIGINS = ['http://localhost:3000', 'https://*.vercel.app']

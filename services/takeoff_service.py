@@ -7,6 +7,7 @@ from database import (
     get_page, get_elevation_pages, supabase_request
 )
 from config import config
+from utils.scale import get_safe_scale_ratio, get_safe_dpi
 
 
 def calculate_takeoff_for_page(page_id):
@@ -28,9 +29,9 @@ def calculate_takeoff_for_page(page_id):
     elevation_name = page.get('elevation_name', 'unknown')
     extraction_data = page.get('extraction_data', {})
     predictions = extraction_data.get('raw_predictions', [])
-    scale_ratio = float(page.get('scale_ratio') or 48)
-    dpi = int(page.get('dpi') or config.DEFAULT_DPI)
-    
+    scale_ratio = get_safe_scale_ratio(page.get('scale_ratio'), context=f"takeoff page {page.get('id')}")
+    dpi = get_safe_dpi(page.get('dpi'), context=f"takeoff page {page.get('id')}")
+
     if not predictions:
         return {"error": "No predictions for this page"}
     

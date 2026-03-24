@@ -22,6 +22,7 @@ from database import (
 )
 from core import claude_client
 from geometry import parse_scale_notation
+from utils.scale import get_safe_scale_ratio
 
 
 # ============================================================
@@ -1257,7 +1258,7 @@ def debug_markup():
         image_url = page.get('image_url')
         extraction_data = page.get('extraction_data', {})
         predictions = extraction_data.get('raw_predictions', [])
-        scale_ratio = float(page.get('scale_ratio') or 48)
+        scale_ratio = get_safe_scale_ratio(page.get('scale_ratio'), context=f"page {page_id}")
         job_id = page.get('job_id')
         page_num = page.get('page_number')
         
@@ -1319,7 +1320,7 @@ def test_markup():
         image_url = page.get('image_url')
         extraction_data = page.get('extraction_data', {})
         predictions = extraction_data.get('raw_predictions', [])
-        scale_ratio = float(page.get('scale_ratio') or 48)
+        scale_ratio = get_safe_scale_ratio(page.get('scale_ratio'), context=f"page {page_id}")
         
         # Download and check image
         response = requests.get(image_url, timeout=30)
@@ -2163,6 +2164,99 @@ def import_bluebeam_fresh_endpoint():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================
+# RE-ENRICH BLUEBEAM MATERIALS ENDPOINT
+# ============================================================
+
+@app.route('/reenrich-materials/<job_id>', methods=['POST'])
+def reenrich_materials_endpoint(job_id):
+    """
+    Re-enrich a job's detections with material IDs from bluebeam_subject_mappings.
+
+    Use this when:
+    - A Bluebeam import ran before SKU resolution was deployed
+    - bluebeam_subject_mappings were updated after import
+    - New pricing_items were added after import
+
+    Returns:
+        {
+            "success": true,
+            "job_id": "...",
+            "updated": 42,
+            "skipped": 10
+        }
+    """
+    from database import supabase_request
+
+    print(f"[Re-enrich] Starting re-enrichment for job {job_id}", flush=True)
+
+    # 1. Get detections with bluebeam_content but no assigned_material_id
+    detections = supabase_request(
+        'GET',
+        f'extraction_detections_draft?job_id=eq.{job_id}&bluebeam_content=not.is.null&assigned_material_id=is.null&select=id,bluebeam_content'
+    )
+
+    if not detections:
+        print(f"[Re-enrich] No detections need enrichment for job {job_id}", flush=True)
+        return jsonify({'success': True, 'job_id': job_id, 'updated': 0, 'skipped': 0, 'message': 'No detections need enrichment'})
+
+    print(f"[Re-enrich] Found {len(detections)} detections missing assigned_material_id", flush=True)
+
+    # 2. Load bluebeam_subject_mappings with SKUs
+    mappings = supabase_request('GET', 'bluebeam_subject_mappings?active=eq.true&suggested_sku=not.is.null&select=bluebeam_subject,suggested_sku')
+    if not mappings:
+        return jsonify({'success': False, 'error': 'No subject mappings with SKUs found'})
+
+    subject_to_sku = {m['bluebeam_subject']: m['suggested_sku'] for m in mappings}
+    print(f"[Re-enrich] Loaded {len(subject_to_sku)} subject->SKU mappings", flush=True)
+
+    # 3. Resolve SKUs to pricing_items.id
+    all_skus = list(set(subject_to_sku.values()))
+    sku_filter = ','.join(f'"{s}"' for s in all_skus)
+    pricing_items = supabase_request('GET', f'pricing_items?sku=in.({sku_filter})&active=eq.true&select=id,sku')
+
+    if not pricing_items:
+        return jsonify({'success': False, 'error': 'No pricing_items found for the SKUs'})
+
+    sku_to_pricing = {item['sku']: item['id'] for item in pricing_items}
+    print(f"[Re-enrich] Resolved {len(sku_to_pricing)} SKUs to pricing_items", flush=True)
+
+    # 4. Build subject -> pricing_id lookup
+    subject_to_pricing = {}
+    for subject, sku in subject_to_sku.items():
+        if sku in sku_to_pricing:
+            subject_to_pricing[subject] = sku_to_pricing[sku]
+
+    # 5. Update detections
+    updated = 0
+    skipped = 0
+
+    for det in detections:
+        subject = det['bluebeam_content']
+        pricing_id = subject_to_pricing.get(subject)
+
+        if pricing_id:
+            result = supabase_request(
+                'PATCH',
+                f'extraction_detections_draft?id=eq.{det["id"]}',
+                {'assigned_material_id': pricing_id}
+            )
+            if result is not None:
+                updated += 1
+            else:
+                skipped += 1
+        else:
+            skipped += 1
+
+    print(f"[Re-enrich] Complete: {updated} updated, {skipped} skipped", flush=True)
+    return jsonify({
+        'success': True,
+        'job_id': job_id,
+        'updated': updated,
+        'skipped': skipped
+    })
 
 
 # ============================================================

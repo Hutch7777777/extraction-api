@@ -11,6 +11,7 @@ from core import detect_with_roboflow, ocr_schedule_with_claude, extract_elevati
 from geometry import calculate_real_measurements
 from services.detection_postprocess import postprocess_detections
 from config import config
+from utils.scale import get_safe_scale_ratio, get_safe_dpi
 import datetime
 
 
@@ -115,7 +116,7 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
             return
         
         default_scale = job.get('default_scale_ratio')
-        job_dpi = job.get('plan_dpi', config.DEFAULT_DPI)
+        job_dpi = get_safe_dpi(job.get('plan_dpi'), context=f"job {job_id}")
         
         # Get classified pages
         pages = get_classified_pages(job_id)
@@ -143,7 +144,10 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
             image_url = page.get('image_url')
             
             # Use scale priority: override > page > job default > fallback
-            scale_ratio = scale_override or page.get('scale_ratio') or default_scale or 48
+            scale_ratio = get_safe_scale_ratio(
+                scale_override or page.get('scale_ratio') or default_scale,
+                context=f"extraction page {page_id}"
+            )
             dpi = page.get('dpi') or job_dpi
             
             # Run Roboflow detection

@@ -3,6 +3,7 @@ Detection measurement calculations
 """
 
 from config import config
+from utils.scale import get_safe_scale_ratio, get_safe_dpi
 
 
 def calculate_real_dimensions(pixel_width, pixel_height, scale_ratio, dpi=None, is_triangle=False):
@@ -19,11 +20,8 @@ def calculate_real_dimensions(pixel_width, pixel_height, scale_ratio, dpi=None, 
     Returns:
         Dict with real_width_in, real_height_in, real_width_ft, real_height_ft, area_sf, perimeter_lf
     """
-    if dpi is None:
-        dpi = config.DEFAULT_DPI
-
-    if not scale_ratio or scale_ratio <= 0:
-        scale_ratio = 48  # Default 1/4" scale
+    dpi = get_safe_dpi(dpi, context="calculate_real_dimensions")
+    scale_ratio = get_safe_scale_ratio(scale_ratio, context="calculate_real_dimensions")
 
     inches_per_pixel = 1.0 / dpi
     real_inches_per_pixel = inches_per_pixel * scale_ratio
@@ -61,28 +59,25 @@ def calculate_real_dimensions(pixel_width, pixel_height, scale_ratio, dpi=None, 
 def calculate_real_measurements(predictions, scale_ratio, dpi=None):
     """
     Convert pixel-based predictions to real-world measurements.
-    
+
     Args:
         predictions: List of Roboflow predictions
         scale_ratio: Drawing scale ratio
         dpi: Image DPI (defaults to config value)
-    
+
     Returns:
         Dict with items, counts, and areas by class
     """
-    if dpi is None:
-        dpi = config.DEFAULT_DPI
-    
-    if not scale_ratio or scale_ratio <= 0:
-        scale_ratio = 48  # Default 1/4" scale
-        scale_warning = "Using default scale"
-    else:
-        scale_warning = None
-    
+    dpi = get_safe_dpi(dpi, context="calculate_real_measurements")
+
+    original_ratio = scale_ratio
+    scale_ratio = get_safe_scale_ratio(scale_ratio, context="calculate_real_measurements")
+    scale_warning = "Using default scale" if (not original_ratio or original_ratio <= 0) else None
+
     inches_per_pixel = 1.0 / dpi
     real_inches_per_pixel = inches_per_pixel * scale_ratio
     sqft_per_sq_pixel = (real_inches_per_pixel ** 2) / 144
-    
+
     results = {
         'scale_used': scale_ratio,
         'scale_warning': scale_warning,
