@@ -10,6 +10,7 @@ from database import (
 from config import config
 from utils.scale import get_safe_scale_ratio, get_safe_dpi
 from geometry.area import compute_detection_area_sf, compute_detection_perimeter_lf
+from geometry import calculate_net_siding_sf
 
 logger = logging.getLogger(__name__)
 
@@ -160,9 +161,14 @@ def calculate_takeoff_for_page(page_id):
     
     # CRITICAL: Gross Facade = Building - Roof
     gross_facade_sf = areas['building_area_sf'] - areas['roof_area_sf']
-    
-    # Net siding = Gross Facade - Openings + Gables
-    net_siding_sf = gross_facade_sf - areas['window_area_sf'] - areas['door_area_sf'] - areas['garage_area_sf'] + areas['gable_area_sf']
+
+    # Net siding = Gross Facade - Openings + Gables (shared canonical formula)
+    net_siding_sf = calculate_net_siding_sf(
+        areas['building_area_sf'],
+        areas['roof_area_sf'],
+        areas['window_area_sf'] + areas['door_area_sf'] + areas['garage_area_sf'],
+        areas['gable_area_sf']
+    )
     
     # Delete existing elevation calc for this page
     supabase_request('DELETE', 'extraction_elevation_calcs', filters={'page_id': f'eq.{page_id}'})

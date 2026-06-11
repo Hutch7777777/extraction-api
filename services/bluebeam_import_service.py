@@ -35,6 +35,11 @@ from database import (
     update_detection,
     get_detections_by_page,
 )
+from geometry import calculate_net_siding_sf
+from services.detection_normalization import (
+    normalize_detection_class,
+    derive_real_dimensions_ft,
+)
 
 
 # Coordinate tolerance for "unchanged" detection
@@ -874,6 +879,14 @@ POINT_MARKER_CLASSES = {
     'address_block', 'hose_bib', 'vent', 'light_fixture', 'outlet'
 }
 
+# Classes whose aggregation consumes real width/height for linear footage.
+# Import paths never persist real_*_ft, so these are derived on read via
+# derive_real_dimensions_ft() (see services/detection_normalization.py).
+DIMENSION_LF_CLASSES = {
+    'building', 'exterior_wall', 'window', 'door', 'garage', 'garage_door',
+    'outside_corner', 'inside_corner'
+}
+
 
 def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
     """
@@ -904,6 +917,13 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
         detections = []
 
     print(f"[Bluebeam Recalc] Found {len(detections)} active detections", flush=True)
+
+    # 1b. Pages for this job — scale_ratio/dpi feed pixel→real LF derivation
+    pages = supabase_request('GET', 'extraction_pages', filters={
+        'job_id': f'eq.{job_id}',
+        'select': 'id,scale_ratio,dpi'
+    }) or []
+    pages_by_id = {p['id']: p for p in pages if p.get('id')}
 
     # 2. Initialize aggregation buckets
     facade = {
@@ -951,11 +971,22 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
 
     # 3. Aggregate by class
     for det in detections:
-        cls = (det.get('class') or '').lower().replace(' ', '_')
+        # Single choke point: collapses corner spelling variants
+        # (corner_outside/corner, etc.) to canonical names — see T-1 in
+        # docs/AUDIT_VERIFICATION_estimation-api.md
+        cls = normalize_detection_class(det.get('class'))
         area = float(det.get('area_sf') or 0)
         perim = float(det.get('perimeter_lf') or 0)
-        width_ft = float(det.get('real_width_ft') or 0)
-        height_ft = float(det.get('real_height_ft') or 0)
+        # Bluebeam Count markups are deduplicated to one row carrying the
+        # group total in item_count; plain detections have item_count NULL
+        qty = int(det.get('item_count') or 1)
+
+        if cls in DIMENSION_LF_CLASSES:
+            width_ft, height_ft, _dim_source = derive_real_dimensions_ft(
+                det, pages_by_id.get(det.get('page_id'))
+            )
+        else:
+            width_ft = height_ft = 0.0
 
         if cls in ('building', 'exterior_wall'):
             facade['gross_area_sf'] += area
@@ -963,7 +994,7 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
             facade['level_starter_lf'] += width_ft
 
         elif cls == 'window':
-            windows['count'] += 1
+            windows['count'] += qty
             windows['area_sf'] += area
             windows['perimeter_lf'] += perim
             windows['head_lf'] += width_ft
@@ -971,32 +1002,32 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
             windows['sill_lf'] += width_ft
 
         elif cls == 'door':
-            doors['count'] += 1
+            doors['count'] += qty
             doors['area_sf'] += area
             doors['perimeter_lf'] += perim
             doors['head_lf'] += width_ft
             doors['jamb_lf'] += height_ft * 2
 
         elif cls in ('garage', 'garage_door'):
-            garages['count'] += 1
+            garages['count'] += qty
             garages['area_sf'] += area
             garages['perimeter_lf'] += perim
             garages['head_lf'] += width_ft
             garages['jamb_lf'] += height_ft * 2
 
         elif cls == 'gable':
-            gables['count'] += 1
+            gables['count'] += qty
             gables['area_sf'] += area
             # Gable perimeter approximates rake length (two sloped sides)
             gables['rake_lf'] += perim
 
         elif cls == 'outside_corner':
-            corners['outside_count'] += 1
-            corners['outside_lf'] += height_ft
+            corners['outside_count'] += qty
+            corners['outside_lf'] += height_ft * qty
 
         elif cls == 'inside_corner':
-            corners['inside_count'] += 1
-            corners['inside_lf'] += height_ft
+            corners['inside_count'] += qty
+            corners['inside_lf'] += height_ft * qty
 
         elif cls == 'roof':
             roof_area_sf += area
@@ -1009,7 +1040,7 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
                     'measurement_type': 'count',
                     'unit': 'EA'
                 }
-            detection_counts[cls]['count'] += 1
+            detection_counts[cls]['count'] += qty
 
         # Collect material assignments
         if det.get('assigned_material_id'):
@@ -1021,9 +1052,11 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
                 'unit': 'SF' if area > 0 else 'EA'
             })
 
-    # 4. Calculate net siding (gross facade - roof - openings + gables)
+    # 4. Calculate net siding (shared canonical formula)
     total_opening_sf = windows['area_sf'] + doors['area_sf'] + garages['area_sf']
-    facade['net_siding_sf'] = facade['gross_area_sf'] - roof_area_sf - total_opening_sf + gables['area_sf']
+    facade['net_siding_sf'] = calculate_net_siding_sf(
+        facade['gross_area_sf'], roof_area_sf, total_opening_sf, gables['area_sf']
+    )
 
     # 5. Calculate trim totals
     trim = {

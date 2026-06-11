@@ -10,6 +10,19 @@ from utils.scale import get_safe_scale_ratio, get_safe_dpi
 logger = logging.getLogger(__name__)
 
 
+def calculate_net_siding_sf(building_area_sf, roof_area_sf, opening_area_sf, gable_area_sf=0.0):
+    """
+    Canonical net-siding formula (single source — see CLAUDE.md):
+
+        gross_facade_sf = building_area_sf - roof_area_sf
+        net_siding_sf   = gross_facade_sf - openings + gables
+
+    All callers that compute net siding must use this function.
+    """
+    gross_facade_sf = (building_area_sf or 0) - (roof_area_sf or 0)
+    return gross_facade_sf - (opening_area_sf or 0) + (gable_area_sf or 0)
+
+
 def calculate_real_dimensions(pixel_width, pixel_height, scale_ratio, dpi=None, is_triangle=False):
     """
     Calculate real-world dimensions for a single detection.
@@ -142,7 +155,12 @@ def calculate_real_measurements(predictions, scale_ratio, dpi=None):
         sum(results['areas'][k] for k in ['window_sqft', 'door_sqft', 'garage_sqft']), 1
     )
     results['areas']['net_siding_sqft'] = round(
-        results['areas']['gross_wall_sqft'] - results['areas']['openings_sqft'], 1
+        calculate_net_siding_sf(
+            results['areas']['building_sqft'],
+            results['areas']['roof_sqft'],
+            results['areas']['openings_sqft'],
+            results['areas']['gable_sqft']
+        ), 1
     )
     
     return results

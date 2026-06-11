@@ -10,7 +10,11 @@ from geometry.measurements import (
     calculate_area_sf,
     calculate_perimeter_lf
 )
-from geometry.calculations import calculate_real_measurements, calculate_real_dimensions
+from geometry.calculations import (
+    calculate_real_measurements,
+    calculate_real_dimensions,
+    calculate_net_siding_sf
+)
 from geometry.area import compute_detection_area_sf, compute_detection_perimeter_lf
 
 __all__ = [
@@ -20,6 +24,7 @@ __all__ = [
     'calculate_area_sf', 'calculate_perimeter_lf',
     'calculate_real_measurements',
     'calculate_real_dimensions',
+    'calculate_net_siding_sf',
     'compute_detection_area_sf',
     'compute_detection_perimeter_lf'
 ]

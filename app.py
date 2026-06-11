@@ -1352,7 +1352,8 @@ def generate_facade_markup():
     from io import BytesIO
     from PIL import Image, ImageDraw, ImageFont
     from database import upload_to_storage
-    
+    from geometry import calculate_net_siding_sf
+
     data = request.json
     job_id = data.get('job_id')
     page_id = data.get('page_id')
@@ -1401,8 +1402,9 @@ def generate_facade_markup():
         building_area_sf = 0
         roof_area_sf = 0
         openings_sf = 0
-        window_count = door_count = garage_count = 0
-        
+        gable_area_sf = 0
+        window_count = door_count = garage_count = gable_count = 0
+
         buildings = []
         roofs = []
         openings = []
@@ -1430,9 +1432,14 @@ def generate_facade_markup():
                 if cls == 'window': window_count += 1
                 elif cls == 'door': door_count += 1
                 elif cls == 'garage': garage_count += 1
-        
+            elif cls == 'gable':
+                gable_area_sf += area
+                gable_count += 1
+
         gross_facade_sf = building_area_sf - roof_area_sf
-        net_siding_sf = gross_facade_sf - openings_sf
+        net_siding_sf = calculate_net_siding_sf(
+            building_area_sf, roof_area_sf, openings_sf, gable_area_sf
+        )
         
         # Draw building (blue)
         for (x1, y1, x2, y2) in buildings:
@@ -1471,7 +1478,7 @@ def generate_facade_markup():
             f"NET SIDING: {net_siding_sf:,.0f} SF",
             f"Building: {building_area_sf:,.0f} SF - Roof: {roof_area_sf:,.0f} SF",
             f"Gross Facade: {gross_facade_sf:,.0f} SF",
-            f"Openings: {openings_sf:,.0f} SF",
+            f"Openings: -{openings_sf:,.0f} SF | Gables: +{gable_area_sf:,.0f} SF",
             f"Win: {window_count} | Door: {door_count} | Garage: {garage_count}"
         ]
         
@@ -1516,9 +1523,11 @@ def generate_facade_markup():
             "roof_area_sf": round(roof_area_sf, 2),
             "gross_facade_sf": round(gross_facade_sf, 2),
             "openings_sf": round(openings_sf, 2),
+            "gable_area_sf": round(gable_area_sf, 2),
             "window_count": window_count,
             "door_count": door_count,
-            "garage_count": garage_count
+            "garage_count": garage_count,
+            "gable_count": gable_count
         })
     
     return jsonify({

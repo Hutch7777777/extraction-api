@@ -37,6 +37,7 @@ except ImportError:
 
 from config import config
 from database import supabase_request, upload_to_storage, create_job, update_job, create_page
+from services.detection_normalization import normalize_detection_class
 
 
 # =============================================================================
@@ -527,14 +528,15 @@ def classify_page_from_annotations(annotations_on_page: List[Dict], page_num: in
     if not annotations_on_page:
         return 'cover' if page_num == 1 else 'detail'
 
-    # Check what classes are present
-    classes = set(a.get('class', '') for a in annotations_on_page)
+    # Check what classes are present (normalized so corner spelling
+    # variants from any import path are recognized)
+    classes = set(normalize_detection_class(a.get('class')) for a in annotations_on_page)
 
     # Elevation indicators - typical siding/exterior elements
     elevation_classes = {
         'siding', 'trim', 'window', 'door', 'garage', 'soffit',
         'fascia', 'flashing', 'corbel', 'wrb', 'belly_band',
-        'corner_outside', 'corner_inside', 'column', 'post',
+        'outside_corner', 'inside_corner', 'column', 'post',
         'gutter', 'downspout', 'shutter', 'exterior_wall',
         'eave', 'rake', 'stone', 'stucco', 'brick', 'vent'
     }
@@ -1367,13 +1369,18 @@ def import_bluebeam_fresh(
 
         # 7b. Calculate and insert extraction_job_totals (required for Approve button)
         # Aggregate item_count by class (for corners, flashing counts, etc.)
+        # Classes go through normalize_detection_class so corner spelling
+        # variants (corner_outside vs outside_corner, e.g. from a user-supplied
+        # class_mapping) all land in one bucket. A detection without an
+        # item_count group total still counts as 1 of itself — same quantity
+        # semantics as aggregate_detections_for_recalc().
         item_counts_by_class = {}
         for det in all_detections:
-            cls = det.get('class', 'unknown')
-            item_count = det.get('item_count') or 0
+            cls = normalize_detection_class(det.get('class')) or 'unknown'
+            qty = int(det.get('item_count') or 1)
             if cls not in item_counts_by_class:
                 item_counts_by_class[cls] = 0
-            item_counts_by_class[cls] += item_count
+            item_counts_by_class[cls] += qty
 
         # Calculate totals for extraction_job_totals
         # Siding SF = all siding-type area_sf values
@@ -1383,9 +1390,10 @@ def import_bluebeam_fresh(
         # Net siding = gross siding - deductions
         net_siding_sf = max(0, siding_sf - deduction_sf)
 
-        # Corner counts from item_count aggregation
-        outside_corners = item_counts_by_class.get('corner_outside', 0)
-        inside_corners = item_counts_by_class.get('corner_inside', 0)
+        # Corner counts from item_count aggregation (canonical names — the
+        # normalize step above collapsed corner_outside/corner_inside into these)
+        outside_corners = item_counts_by_class.get('outside_corner', 0)
+        inside_corners = item_counts_by_class.get('inside_corner', 0)
 
         # Window/door/garage counts from flashing item_counts
         # (Bluebeam uses "Window Head Flashing Count" etc. which map to 'flashing' class)
