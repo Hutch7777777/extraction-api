@@ -1964,6 +1964,50 @@ def import_bluebeam():
         return jsonify(result), 400
 
 
+@app.route('/recalculate-job/<job_id>', methods=['POST'])
+def recalculate_job(job_id):
+    """
+    Re-run detection aggregation for an existing job and trigger the n8n
+    recalculation pipeline — without re-importing a PDF and without
+    touching detections.
+
+    Reads extraction_detections_draft + extraction_pages (read-only),
+    rebuilds the Approve-from-Detection-Editor webhook payload with
+    freshly aggregated numbers (instead of totals stored at import
+    time), and POSTs it to the same n8n approve webhook the Detection
+    Editor's "Approve & Calculate" button uses.
+
+    Query params:
+        dry_run=true — return the aggregated payload WITHOUT calling
+        the n8n webhook. Zero side effects; use to inspect the fresh
+        numbers before firing the pipeline.
+
+    Response:
+        success: bool
+        dry_run + payload: dict (dry_run only)
+        recalculation: dict — n8n webhook status_code/response (when sent)
+    """
+    from services.bluebeam_import_service import (
+        aggregate_detections_for_recalc,
+        trigger_recalculation_webhook,
+    )
+    from database import get_job
+
+    job = get_job(job_id)
+    if not job:
+        return jsonify({'success': False, 'error': f'Job {job_id} not found'}), 404
+
+    dry_run = request.args.get('dry_run', 'false').lower() == 'true'
+    if dry_run:
+        payload = aggregate_detections_for_recalc(job_id)
+        return jsonify({'success': True, 'dry_run': True, 'payload': payload}), 200
+
+    result = trigger_recalculation_webhook(job_id)
+    if result.get('success'):
+        return jsonify({'success': True, 'recalculation': result}), 200
+    return jsonify({'success': False, 'recalculation': result}), 502
+
+
 @app.route('/import-bluebeam/preview', methods=['POST'])
 def import_bluebeam_preview():
     """
