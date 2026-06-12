@@ -5,6 +5,7 @@ Parses Bluebeam BAX/XML files and loads annotations into the database.
 
 Usage:
     pip install requests
+    export SUPABASE_KEY=<service role key>   # required
     python3 load_bax_to_supabase.py /path/to/file.bax [--project-name "My Project"]
     
     # Batch load multiple files:
@@ -22,10 +23,10 @@ from datetime import datetime
 import requests
 
 # ===========================================
-# CONFIGURATION - UPDATE THESE
+# CONFIGURATION
 # ===========================================
 SUPABASE_URL = "https://okwtyttfqbfmcqtenize.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rd3R5dHRmcWJmbWNxdGVuaXplIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MjQ0NjA1MSwiZXhwIjoyMDc4MDIyMDUxfQ.ZsCSC60_9f04O1ra9niD3YG7FgjVKH2Yoii-cP-pOv8"  # Replace with your service role key
+SUPABASE_KEY = os.environ['SUPABASE_KEY']  # service role key — required, no fallback
 
 # ===========================================
 # PARSING FUNCTIONS
@@ -461,13 +462,7 @@ def main():
     parser.add_argument('--dry-run', '-d', action='store_true', help='Parse only, do not upload')
     
     args = parser.parse_args()
-    
-    # Check API key
-    if SUPABASE_KEY == "YOUR_SERVICE_ROLE_KEY_HERE":
-        print("ERROR: Please update SUPABASE_KEY in the script with your service role key")
-        print("       Find it in Supabase Dashboard > Settings > API > service_role key")
-        sys.exit(1)
-    
+
     print("="*60)
     print("BAX FILE LOADER")
     print("="*60)
