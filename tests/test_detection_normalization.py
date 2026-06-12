@@ -163,6 +163,45 @@ class TestDeriveRealDimensionsFt(unittest.TestCase):
         width, height, source = derive_real_dimensions_ft(det, page)
         self.assertEqual((width, height, source), (10.0, 5.0, 'pixel_scale'))
 
+    def test_area_perimeter_quadratic_outranks_pixel_scale(self):
+        # Trusted area/perimeter (computed with the original import scale)
+        # win over page scale: A=50, P=30 → w+h=15, w·h=50 → 10 x 5
+        det = {'area_sf': 50, 'perimeter_lf': 30,
+               'pixel_width': 999, 'pixel_height': 499}
+        page = {'scale_ratio': 48, 'dpi': 200}
+        width, height, source = derive_real_dimensions_ft(det, page)
+        self.assertEqual((width, height, source), (10.0, 5.0, 'area_perimeter'))
+
+    def test_quadratic_orientation_follows_pixel_aspect(self):
+        # Taller-than-wide markup: the smaller root is the width
+        det = {'area_sf': 50, 'perimeter_lf': 30,
+               'pixel_width': 250, 'pixel_height': 500}
+        width, height, source = derive_real_dimensions_ft(det, {})
+        self.assertEqual((width, height, source), (5.0, 10.0, 'area_perimeter'))
+
+    def test_area_aspect_when_perimeter_missing(self):
+        # w = sqrt(A * pxw/pxh) = sqrt(50 * 2) = 10, h = 5
+        det = {'area_sf': 50, 'pixel_width': 500, 'pixel_height': 250}
+        width, height, source = derive_real_dimensions_ft(det, {})
+        self.assertEqual((width, height, source), (10.0, 5.0, 'area_aspect'))
+
+    def test_pixel_scale_sanity_bound_rejects_and_names_page(self):
+        # Calibrated pixels-per-foot scales (e.g. 13.978 on MN568 p10/p11)
+        # poison the architectural formula: 3000px * 13.978/200/12 = 17.5ft
+        # is plausible, but a building outline at 8200px → 47.8ft trips the
+        # bound. The rejection log must name the page and scale_ratio.
+        det = {'id': 'det-big', 'class': 'building',
+               'pixel_width': 8200, 'pixel_height': 700,
+               'markup_type': 'rect'}
+        page = {'page_number': 10, 'scale_ratio': 13.978, 'dpi': 200}
+        with self.assertLogs('services.detection_normalization', level='WARNING') as captured:
+            width, height, source = derive_real_dimensions_ft(det, page)
+        self.assertIsNone(source)
+        output = '\n'.join(captured.output)
+        self.assertIn('page 10', output)
+        self.assertIn('13.978', output)
+        self.assertIn('det-big', output)
+
 
 if __name__ == '__main__':
     unittest.main()

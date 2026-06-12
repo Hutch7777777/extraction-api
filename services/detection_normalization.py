@@ -62,9 +62,18 @@ POINT_MARKUP_TYPES = {'point'}
 
 # Boxes at or below this size in BOTH dimensions are treated as point
 # markers even when markup_type is missing: fresh-import stamps are 16px,
-# intelligent-analysis corner markers are 20px. No real building element
+# intelligence-analysis corner markers are 20px. No real building element
 # renders this small at any plausible scale/DPI.
 MIN_MEANINGFUL_PIXELS = 24
+
+# Sanity bounds for pixel×scale derivation. Page scale_ratio values are
+# not all in architectural units (elevation pages calibrated in the
+# Detection Editor store values like 13.978 whose unit convention
+# differs), so a derived dimension outside these bounds means the scale
+# convention didn't match — reject and fall through rather than poison
+# the totals.
+MIN_PLAUSIBLE_FT = 0.5
+MAX_PLAUSIBLE_FT = 40.0
 
 
 def normalize_detection_class(raw_class) -> str:
@@ -141,20 +150,63 @@ def _default_warn(message: str):
     logger.warning(message)
 
 
+def _dims_from_area_perimeter(area_sf: float, perimeter_lf: float,
+                              pixel_width: float, pixel_height: float):
+    """
+    Recover rectangle width/height (ft) from the stored area and
+    perimeter columns: w + h = P/2 and w·h = A, so w and h are the roots
+    of x² − (P/2)x + A = 0. Exact and unit-free — both inputs were
+    computed with the original (trusted) import scale, so this is immune
+    to page scale_ratio convention drift. Orientation (which root is the
+    width) comes from the pixel aspect ratio.
+
+    Returns (width_ft, height_ft) or None when not solvable.
+    """
+    if area_sf <= 0 or perimeter_lf <= 0:
+        return None
+    half = perimeter_lf / 2.0
+    disc = half * half - 4.0 * area_sf
+    if disc < 0:
+        return None
+    root = disc ** 0.5
+    longer, shorter = (half + root) / 2.0, (half - root) / 2.0
+    if shorter <= 0:
+        return None
+    if pixel_height > pixel_width > 0:
+        return round(shorter, 2), round(longer, 2)
+    return round(longer, 2), round(shorter, 2)
+
+
+def _dims_from_area_aspect(area_sf: float, pixel_width: float, pixel_height: float):
+    """
+    Recover width/height (ft) from the stored area and the pixel aspect
+    ratio: w = √(A · pxw/pxh), h = A / w. Used when perimeter is missing
+    or inconsistent. Unit-free, like the quadratic.
+    """
+    if area_sf <= 0 or pixel_width <= 0 or pixel_height <= 0:
+        return None
+    width = (area_sf * pixel_width / pixel_height) ** 0.5
+    return round(width, 2), round(area_sf / width, 2)
+
+
 def derive_real_dimensions_ft(detection: Dict, page: Optional[Dict] = None,
                               warn=_default_warn) -> Tuple[float, float, Optional[str]]:
     """
     Resolve a detection's real-world width/height in feet, in order:
 
     1. Stored real_width_ft / real_height_ft columns (detection_details rows)
-    2. Pixel geometry × the page's scale_ratio (skipped for point markers,
-       whose pixel box is a marker size, not a measurement)
-    3. A "W x H" dimension parsed from the Bluebeam content text
-    4. Give up: log a warning naming the detection id and return zeros
+    2. Area + perimeter quadratic — exact, unit-free, from trusted columns
+    3. Area + pixel aspect ratio — unit-free, from trusted area
+    4. Pixel geometry × the page's scale_ratio (skipped for point markers;
+       results outside MIN/MAX_PLAUSIBLE_FT are rejected with a log naming
+       the page and scale, since page scale conventions are inconsistent)
+    5. A "W x H" dimension parsed from the Bluebeam content text
+    6. Give up: log a warning naming the detection id and return zeros
 
     Returns:
         (width_ft, height_ft, source) where source is one of
-        'stored' | 'pixel_scale' | 'content' | None
+        'stored' | 'area_perimeter' | 'area_aspect' | 'pixel_scale'
+        | 'content' | None
     """
     page = page or {}
 
@@ -166,6 +218,8 @@ def derive_real_dimensions_ft(detection: Dict, page: Optional[Dict] = None,
 
     pixel_width = _to_float(detection.get('pixel_width'))
     pixel_height = _to_float(detection.get('pixel_height'))
+    area_sf = _to_float(detection.get('area_sf'))
+    perimeter_lf = _to_float(detection.get('perimeter_lf'))
     markup_type = (detection.get('markup_type') or '').strip().lower()
     is_point_marker = (
         markup_type in POINT_MARKUP_TYPES
@@ -173,27 +227,49 @@ def derive_real_dimensions_ft(detection: Dict, page: Optional[Dict] = None,
             and 0 < pixel_height <= MIN_MEANINGFUL_PIXELS)
     )
 
-    # 2. Pixel geometry × page scale
+    # 2. Trusted area + perimeter (exact rectangle recovery)
+    dims = _dims_from_area_perimeter(area_sf, perimeter_lf, pixel_width, pixel_height)
+    if dims:
+        return dims[0], dims[1], 'area_perimeter'
+
+    # 3. Trusted area + pixel aspect
+    dims = _dims_from_area_aspect(area_sf, pixel_width, pixel_height)
+    if dims:
+        return dims[0], dims[1], 'area_aspect'
+
+    # 4. Pixel geometry × page scale, sanity-bounded
     scale_ratio = _to_float(page.get('scale_ratio'))
     if scale_ratio > 0 and not is_point_marker and (pixel_width > 0 or pixel_height > 0):
         dpi = get_safe_dpi(page.get('dpi'),
                            context=f"derive_real_dimensions detection {detection.get('id')}")
         ft_per_pixel = scale_ratio / dpi / 12.0
-        return (round(pixel_width * ft_per_pixel, 2),
-                round(pixel_height * ft_per_pixel, 2),
-                'pixel_scale')
+        width_ft = round(pixel_width * ft_per_pixel, 2)
+        height_ft = round(pixel_height * ft_per_pixel, 2)
+        implausible = any(
+            d > 0 and not (MIN_PLAUSIBLE_FT <= d <= MAX_PLAUSIBLE_FT)
+            for d in (width_ft, height_ft)
+        )
+        if not implausible:
+            return width_ft, height_ft, 'pixel_scale'
+        logger.warning(
+            f"[DimensionDerivation] pixel-scale result rejected for detection "
+            f"{detection.get('id')} (class={detection.get('class')}): "
+            f"{width_ft}x{height_ft} ft outside [{MIN_PLAUSIBLE_FT}, {MAX_PLAUSIBLE_FT}] — "
+            f"page {page.get('page_number')} scale_ratio={scale_ratio} is likely "
+            f"in a different unit convention; falling through"
+        )
 
-    # 3. Dimensions written into the Bluebeam content text
+    # 5. Dimensions written into the Bluebeam content text
     content = detection.get('bluebeam_content')
     dims = parse_content_dimensions_ft(content)
     if dims:
         return dims[0], dims[1], 'content'
 
-    # 4. Nothing usable — warn instead of silently contributing zero
+    # 6. Nothing usable — warn instead of silently contributing zero
     warn(
         f"[DimensionDerivation] WARNING: detection {detection.get('id')} "
         f"(class={detection.get('class')}) has no derivable real dimensions: "
-        f"real_* columns empty, "
+        f"real_* columns empty, no usable area/perimeter, "
         f"{'point marker' if is_point_marker else 'page scale_ratio missing' if scale_ratio <= 0 else 'no pixel geometry'}, "
         f"no parseable 'W x H' in content ({content!r}) — treating as 0 LF"
     )

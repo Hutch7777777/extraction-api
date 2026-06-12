@@ -50,9 +50,11 @@ class TestAggregateDetectionsForRecalc(unittest.TestCase):
         # 500px → 10 ft wide, 250px → 5 ft tall
         {'id': 'd4', 'class': 'window', 'area_sf': 50, 'page_id': 'page-1',
          'pixel_width': 500, 'pixel_height': 250, 'markup_type': 'rect'},
-        # Building: 1000px → 20 ft of starter
-        {'id': 'd5', 'class': 'building', 'area_sf': 2000, 'page_id': 'page-1',
-         'pixel_width': 1000, 'pixel_height': 600, 'markup_type': 'rect'},
+        # Building: area 2000 + perimeter 180 → quadratic w=50, h=40
+        # (trusted area/perimeter outrank pixel×scale in the derivation)
+        {'id': 'd5', 'class': 'building', 'area_sf': 2000, 'perimeter_lf': 180,
+         'page_id': 'page-1', 'pixel_width': 1000, 'pixel_height': 600,
+         'markup_type': 'rect'},
         {'id': 'd6', 'class': 'roof', 'area_sf': 800, 'page_id': 'page-1'},
         {'id': 'd7', 'class': 'gable', 'area_sf': 150, 'page_id': 'page-1',
          'perimeter_lf': 30},
@@ -94,8 +96,10 @@ class TestAggregateDetectionsForRecalc(unittest.TestCase):
         self.assertEqual(payload['windows']['jamb_lf'], 10.0)   # height * 2
 
     def test_starter_lf_derived_for_building(self):
+        # Quadratic from area 2000 + perimeter 180: w + h = 90, w·h = 2000
+        # → w = 50 (width per pixel aspect)
         payload = self.build_payload()
-        self.assertEqual(payload['facade']['level_starter_lf'], 20.0)
+        self.assertEqual(payload['facade']['level_starter_lf'], 50.0)
 
     def test_point_marker_group_total_honored(self):
         payload = self.build_payload()

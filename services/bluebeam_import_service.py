@@ -918,12 +918,30 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
 
     print(f"[Bluebeam Recalc] Found {len(detections)} active detections", flush=True)
 
-    # 1b. Pages for this job — scale_ratio/dpi feed pixel→real LF derivation
+    # 1b. Pages for this job — scale_ratio/dpi feed pixel→real LF
+    # derivation; page_number is for scale-rejection log messages
     pages = supabase_request('GET', 'extraction_pages', filters={
         'job_id': f'eq.{job_id}',
-        'select': 'id,scale_ratio,dpi'
+        'select': 'id,page_number,scale_ratio,dpi'
     }) or []
     pages_by_id = {p['id']: p for p in pages if p.get('id')}
+
+    # 1c. Facade layer selection: jobs marked up with per-wall-section
+    # 'exterior wall' areas also carry page-level 'building' outlines that
+    # OVERLAP them — summing both double-counts the facade (MN568: 8,437
+    # building + 3,697 exterior wall = 12,134 vs known-good 3,697).
+    # Known-good approve payloads use the exterior-wall layer when present.
+    facade_class = 'building'
+    if any(normalize_detection_class(d.get('class')) == 'exterior_wall' for d in detections):
+        facade_class = 'exterior_wall'
+        excluded_outlines = sum(
+            1 for d in detections
+            if normalize_detection_class(d.get('class')) == 'building'
+        )
+        if excluded_outlines:
+            print(f"[Bluebeam Recalc] Facade layer = exterior_wall; excluding "
+                  f"{excluded_outlines} overlapping building outline(s) from facade totals",
+                  flush=True)
 
     # 2. Initialize aggregation buckets
     facade = {
@@ -968,6 +986,7 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
     roof_area_sf = 0.0  # Track roof to subtract from facade
     detection_counts = {}  # For point markers
     material_assignments = []
+    corner_rows_seen = False  # Whether ANY corner-class rows exist in draft
 
     # 3. Aggregate by class
     for det in detections:
@@ -981,17 +1000,25 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
         # group total in item_count; plain detections have item_count NULL
         qty = int(det.get('item_count') or 1)
 
-        if cls in DIMENSION_LF_CLASSES:
+        needs_dims = cls in DIMENSION_LF_CLASSES and (
+            cls not in ('building', 'exterior_wall') or cls == facade_class
+        )
+        if needs_dims:
             width_ft, height_ft, _dim_source = derive_real_dimensions_ft(
                 det, pages_by_id.get(det.get('page_id'))
             )
         else:
             width_ft = height_ft = 0.0
 
-        if cls in ('building', 'exterior_wall'):
+        if cls == facade_class:
             facade['gross_area_sf'] += area
             facade['perimeter_lf'] += width_ft  # Bottom edge = starter
             facade['level_starter_lf'] += width_ft
+
+        elif cls in ('building', 'exterior_wall'):
+            # The non-facade layer (overlapping outlines) — excluded from
+            # facade totals; see facade_class selection above
+            pass
 
         elif cls == 'window':
             windows['count'] += qty
@@ -1022,25 +1049,35 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
             gables['rake_lf'] += perim
 
         elif cls == 'outside_corner':
+            corner_rows_seen = True
             corners['outside_count'] += qty
             corners['outside_lf'] += height_ft * qty
 
         elif cls == 'inside_corner':
+            corner_rows_seen = True
             corners['inside_count'] += qty
             corners['inside_lf'] += height_ft * qty
 
         elif cls == 'roof':
             roof_area_sf += area
 
-        elif cls in POINT_MARKER_CLASSES:
+        elif cls in POINT_MARKER_CLASSES or (det.get('markup_type') or '') == 'point':
+            # Membership by class set OR markup_type, so point classes not
+            # in the hardcoded set (e.g. gable_topout) still surface.
+            # total_sf/total_lf ride along so per-class measurements (e.g.
+            # belly band LF) reach the n8n/TS side, not just counts.
             if cls not in detection_counts:
                 detection_counts[cls] = {
                     'count': 0,
+                    'total_sf': 0.0,
+                    'total_lf': 0.0,
                     'display_name': cls.replace('_', ' ').title(),
                     'measurement_type': 'count',
                     'unit': 'EA'
                 }
             detection_counts[cls]['count'] += qty
+            detection_counts[cls]['total_sf'] += area
+            detection_counts[cls]['total_lf'] += perim
 
         # Collect material assignments
         if det.get('assigned_material_id'):
@@ -1051,6 +1088,26 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
                 'quantity': area if area > 0 else 1,
                 'unit': 'SF' if area > 0 else 'EA'
             })
+
+    # 3b. Corner fallback: jobs whose corners were counted by floor-plan
+    # analysis (or imported before corner markup parsing) have NO corner
+    # rows in the draft — the only corner data lives in the import-time
+    # extraction_job_totals. Source counts AND LF from there.
+    if not corner_rows_seen:
+        totals_rows = supabase_request('GET', 'extraction_job_totals', filters={
+            'job_id': f'eq.{job_id}'
+        }) or []
+        totals = totals_rows[0] if totals_rows else {}
+        if totals.get('outside_corners_count') or totals.get('inside_corners_count'):
+            corners['outside_count'] = int(totals.get('outside_corners_count') or 0)
+            corners['inside_count'] = int(totals.get('inside_corners_count') or 0)
+            corners['outside_lf'] = float(totals.get('outside_corners_lf') or 0)
+            corners['inside_lf'] = float(totals.get('inside_corners_lf') or 0)
+            corners['source'] = totals.get('corner_source') or 'job_totals'
+            print(f"[Bluebeam Recalc] No corner rows in draft — sourced corners from "
+                  f"extraction_job_totals: {corners['outside_count']} O/S "
+                  f"({corners['outside_lf']} LF), {corners['inside_count']} I/S "
+                  f"({corners['inside_lf']} LF), source={corners['source']}", flush=True)
 
     # 4. Calculate net siding (shared canonical formula)
     total_opening_sf = windows['area_sf'] + doors['area_sf'] + garages['area_sf']
@@ -1089,14 +1146,20 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
         for key in bucket:
             if isinstance(bucket[key], float):
                 bucket[key] = round(bucket[key], 2)
+    for entry in detection_counts.values():
+        for key in ('total_sf', 'total_lf'):
+            if isinstance(entry.get(key), float):
+                entry[key] = round(entry[key], 2)
 
     payload = {
         'job_id': job_id,
         'project_id': project_id,
         'project_name': project.get('name') or job.get('project_name') or 'Bluebeam Import',
-        'client_name': project.get('customer_name') or '',
+        # projects column is client_name (customer_name never existed)
+        'client_name': project.get('client_name') or project.get('customer_name') or '',
         'address': project.get('address') or '',
-        'selected_trades': ['siding'],  # Default to siding
+        # Prefer the project's configured trades; 'siding' only as fallback
+        'selected_trades': project.get('selected_trades') or ['siding'],
 
         'facade': facade,
         'windows': windows,
@@ -1139,17 +1202,24 @@ def _get_product_selections(job_id: str, project_id: str) -> Dict[str, str]:
         'trim_color': 'Arctic White'
     }
 
-    # Try to get from existing cad_hover_measurements
+    # Try to get from existing cad_hover_measurements. The table is keyed
+    # by extraction_id (= job_id, the n8n approve-path convention) — it
+    # has no job_id column — and stores products as flat columns, not a
+    # 'products' JSONB.
     measurements = supabase_request('GET', 'cad_hover_measurements', filters={
-        'job_id': f'eq.{job_id}',
+        'extraction_id': f'eq.{job_id}',
         'order': 'created_at.desc',
         'limit': '1'
     })
 
-    if measurements and measurements[0].get('products'):
-        saved_products = measurements[0]['products']
-        if isinstance(saved_products, dict):
-            products.update({k: v for k, v in saved_products.items() if v})
+    if measurements:
+        row = measurements[0]
+        found = False
+        for key in ('siding_product', 'trim_product'):
+            if row.get(key):
+                products[key] = row[key]
+                found = True
+        if found:
             return products
 
     # Try project_configurations
