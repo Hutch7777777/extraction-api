@@ -453,7 +453,6 @@ def detect_compat():
     """Compatibility endpoint for older n8n workflows that call /detect directly."""
     from core import detect_with_roboflow
     from geometry import calculate_real_measurements
-    from services.detection_postprocess import postprocess_detections
 
     data = request.json or {}
     image_url = data.get('image_url') or data.get('url')
@@ -479,9 +478,7 @@ def detect_compat():
             "calculations": {"counts": {}, "areas": {}}
         }), 502
 
-    raw_predictions = detection.get('predictions', [])
-    postprocess_result = postprocess_detections(raw_predictions)
-    predictions = postprocess_result.get('predictions', [])
+    predictions = detection.get('predictions', [])
     calculations = calculate_real_measurements(predictions, scale_ratio, dpi)
 
     return jsonify({
@@ -489,8 +486,7 @@ def detect_compat():
         "predictions": predictions,
         "calculations": calculations,
         "prediction_count": len(predictions),
-        "raw_prediction_count": len(raw_predictions),
-        "postprocess_stats": postprocess_result.get('stats', {}),
+        "raw_prediction_count": len(predictions),
         "visualization_base64": detection.get('visualization_base64')
     })
 
