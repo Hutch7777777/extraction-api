@@ -448,6 +448,113 @@ def generate_markups():
     return jsonify(result)
 
 
+@app.route('/detect', methods=['POST'])
+def detect_compat():
+    """Compatibility endpoint for older n8n workflows that call /detect directly."""
+    from core import detect_with_roboflow
+    from geometry import calculate_real_measurements
+    from services.detection_postprocess import postprocess_detections
+
+    data = request.json or {}
+    image_url = data.get('image_url') or data.get('url')
+    scale_config = data.get('scale_config') or {}
+
+    if not image_url:
+        return jsonify({"success": False, "error": "image_url required"}), 400
+
+    scale_ratio = (
+        data.get('scale_ratio')
+        or scale_config.get('scale_ratio')
+        or scale_config.get('default_scale_ratio')
+        or config.DEFAULT_SCALE_RATIO
+    )
+    dpi = data.get('dpi') or scale_config.get('dpi') or config.DEFAULT_DPI
+
+    detection = detect_with_roboflow(image_url)
+    if detection.get('error'):
+        return jsonify({
+            "success": False,
+            "error": detection['error'],
+            "predictions": [],
+            "calculations": {"counts": {}, "areas": {}}
+        }), 502
+
+    raw_predictions = detection.get('predictions', [])
+    postprocess_result = postprocess_detections(raw_predictions)
+    predictions = postprocess_result.get('predictions', [])
+    calculations = calculate_real_measurements(predictions, scale_ratio, dpi)
+
+    return jsonify({
+        "success": True,
+        "predictions": predictions,
+        "calculations": calculations,
+        "prediction_count": len(predictions),
+        "raw_prediction_count": len(raw_predictions),
+        "postprocess_stats": postprocess_result.get('stats', {}),
+        "visualization_base64": detection.get('visualization_base64')
+    })
+
+
+@app.route('/markup', methods=['POST'])
+def markup_compat():
+    """Compatibility endpoint for older n8n workflows that call /markup directly."""
+    import base64
+    import requests
+    from io import BytesIO
+    from services.markup_service import generate_markup_image
+    from core import detect_with_roboflow
+
+    data = request.json or {}
+    image_url = data.get('image_url') or data.get('url')
+    predictions = data.get('predictions') or []
+    scale_config = data.get('scale_config') or {}
+
+    if not image_url:
+        return jsonify({"success": False, "error": "image_url required"}), 400
+
+    scale_ratio = (
+        data.get('scale_ratio')
+        or scale_config.get('scale_ratio')
+        or scale_config.get('default_scale_ratio')
+        or config.DEFAULT_SCALE_RATIO
+    )
+    dpi = data.get('dpi') or scale_config.get('dpi') or config.DEFAULT_DPI
+
+    if not predictions:
+        detection = detect_with_roboflow(image_url)
+        if detection.get('error'):
+            return jsonify({"success": False, "error": detection['error']}), 502
+        predictions = detection.get('predictions', [])
+
+    try:
+        response = requests.get(image_url, timeout=30)
+        response.raise_for_status()
+
+        marked_img, totals = generate_markup_image(
+            response.content,
+            predictions,
+            scale_ratio,
+            dpi,
+            trade_filter=config.TRADE_GROUPS['all'],
+            show_dimensions=True,
+            show_labels=True
+        )
+
+        buffer = BytesIO()
+        marked_img.save(buffer, format='JPEG', quality=90)
+        markup_base64 = base64.standard_b64encode(buffer.getvalue()).decode('utf-8')
+
+        return jsonify({
+            "success": True,
+            "markup_base64": markup_base64,
+            "image_base64": markup_base64,
+            "prediction_count": len(predictions),
+            "totals": totals
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/comprehensive-markup', methods=['POST'])
 def comprehensive_markup():
     """Generate comprehensive markup with legend"""

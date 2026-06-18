@@ -18,7 +18,10 @@ class Config:
     # External APIs
     ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
     ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
-    ROBOFLOW_WORKFLOW_URL = "https://serverless.roboflow.com/infer/workflows/exterior-finishes/find-windows-garages-exterior-walls-roofs-buildings-doors-and-gables"
+    ROBOFLOW_WORKFLOW_URL = os.getenv(
+        'ROBOFLOW_WORKFLOW_URL',
+        "https://serverless.roboflow.com/infer/workflows/exterior-finishes/find-windows-garages-exterior-walls-roofs-buildings-doors-and-gables"
+    )
     
     # Supabase
     SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://okwtyttfqbfmcqtenize.supabase.co')
