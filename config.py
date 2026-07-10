@@ -39,6 +39,14 @@ class Config:
         'EXTRACTION_REQUIRE_SIGNED_REQUESTS',
         'true' if _running_on_railway else 'false'
     ).lower() == 'true'
+
+    # Authenticated callback into the n8n calculation pipeline. The same
+    # secret is configured on n8n's Header Auth credential.
+    N8N_WEBHOOK_URL = (
+        os.getenv('N8N_WEBHOOK_URL')
+        or 'https://n8n-production-293e.up.railway.app'
+    ).strip().rstrip('/')
+    N8N_WEBHOOK_SECRET = (os.getenv('N8N_WEBHOOK_SECRET') or '').strip() or None
     
     # External APIs
     ROBOFLOW_API_KEY = (os.getenv('ROBOFLOW_API_KEY') or '').strip() or None

@@ -1287,7 +1287,14 @@ def trigger_recalculation_webhook(job_id: str) -> Dict[str, Any]:
     """
     import requests
 
-    APPROVE_WEBHOOK = 'https://n8n-production-293e.up.railway.app/webhook/approve-detection-editor'
+    approve_webhook = f'{config.N8N_WEBHOOK_URL}/webhook/approve-detection-editor'
+
+    if not config.N8N_WEBHOOK_SECRET:
+        logger.error('N8N_WEBHOOK_SECRET is not configured; refusing unauthenticated callback')
+        return {
+            'success': False,
+            'error': 'Recalculation webhook authentication is not configured'
+        }
 
     print(f"[Bluebeam Recalc] Triggering recalculation for job {job_id}", flush=True)
 
@@ -1297,8 +1304,9 @@ def trigger_recalculation_webhook(job_id: str) -> Dict[str, Any]:
 
         # Call the n8n webhook
         response = requests.post(
-            APPROVE_WEBHOOK,
+            approve_webhook,
             json=payload,
+            headers={'X-Webhook-Secret': config.N8N_WEBHOOK_SECRET},
             timeout=120  # Match the 120s timeout in the n8n workflow
         )
 
