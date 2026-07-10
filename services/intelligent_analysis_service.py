@@ -38,7 +38,7 @@ from utils.validation import normalize_page_type
 MAX_CONCURRENT_PAGES = 10  # Parallel API calls
 MAX_RETRIES = 2
 API_TIMEOUT_SECONDS = 180
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = config.CLAUDE_MODEL
 
 # Token pricing (as of Jan 2025)
 INPUT_TOKEN_COST_PER_1K = 0.003  # $3 per 1M input tokens
@@ -513,7 +513,7 @@ def analyze_job_background(job_id: str) -> None:
 
     try:
         # Update job status
-        update_job(job_id, {'status': 'analyzing', 'stage': 'intelligent_analysis'})
+        update_job(job_id, {'status': 'classifying'})
 
         # Get pending pages
         pages = get_pages_by_job(job_id, status='pending')
@@ -573,9 +573,13 @@ def analyze_job_background(job_id: str) -> None:
                         if isinstance(count, (int, float)):
                             element_totals[key] += count
 
-        # Update job with results
+        classification_error = failed[0].error if failed else None
+
+        # Update job with results. Keep the job in the classification-review
+        # stage even when AI classification fails, so users can manually approve
+        # page types from the converted thumbnails.
         # Note: Use 'classified' status for DB constraint compatibility
-        update_job(job_id, {
+        update_payload = {
             'status': 'classified',
             'pages_classified': len(successful),
             'elevation_count': page_type_counts.get('elevation', 0),
@@ -593,9 +597,21 @@ def analyze_job_background(job_id: str) -> None:
                 'total_output_tokens': total_output_tokens,
                 'estimated_cost_usd': round(estimated_cost, 4),
                 'page_type_counts': dict(page_type_counts),
-                'element_totals': element_totals
+                'element_totals': element_totals,
+                'classification_error': classification_error,
+                'classification_failed_all_pages': len(successful) == 0 and len(failed) > 0
             }
-        })
+        }
+
+        if classification_error:
+            update_payload['error_message'] = (
+                f"AI page classification failed for {len(failed)} of {len(results)} pages: "
+                f"{classification_error}"
+            )
+        else:
+            update_payload['error_message'] = None
+
+        update_job(job_id, update_payload)
 
         # Log summary
         print(f"[{job_id[:8]}] Analysis complete:", flush=True)
@@ -817,7 +833,6 @@ def store_corner_detections(
         x = corner.get('x', 0)
         y = corner.get('y', 0)
         confidence = corner.get('confidence', 0.8)
-        description = corner.get('description', '')
 
         detections.append({
             'job_id': job_id,
@@ -829,10 +844,9 @@ def store_corner_detections(
             'pixel_width': CORNER_SIZE,
             'pixel_height': CORNER_SIZE,
             'confidence': confidence,
-            'source': 'intelligent_analysis',
             'status': 'auto',
             'markup_type': 'point',  # Render as point marker
-            'notes': description
+            'item_count': 1
         })
 
     # Process inside corners
@@ -840,7 +854,6 @@ def store_corner_detections(
         x = corner.get('x', 0)
         y = corner.get('y', 0)
         confidence = corner.get('confidence', 0.8)
-        description = corner.get('description', '')
 
         detections.append({
             'job_id': job_id,
@@ -852,22 +865,25 @@ def store_corner_detections(
             'pixel_width': CORNER_SIZE,
             'pixel_height': CORNER_SIZE,
             'confidence': confidence,
-            'source': 'intelligent_analysis',
             'status': 'auto',
             'markup_type': 'point',  # Render as point marker
-            'notes': description
+            'item_count': 1
         })
 
     # Batch insert all corner detections
     if detections:
         try:
-            batch_create_detections(detections)
-            print(f"  Created {len(detections)} corner detections ({len(outside_corners)} outside, {len(inside_corners)} inside)", flush=True)
+            created = batch_create_detections(detections)
+            if not created:
+                print("  Warning: Failed to store corner detections", flush=True)
+                return 0
+            print(f"  Created {len(created)} corner detections ({len(outside_corners)} outside, {len(inside_corners)} inside)", flush=True)
+            return len(created)
         except Exception as e:
             print(f"  Warning: Failed to store corner detections: {e}", flush=True)
             return 0
 
-    return len(detections)
+    return 0
 
 
 def get_extraction_summary(extracted_data: Dict) -> Dict:

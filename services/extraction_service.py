@@ -3,6 +3,8 @@ Extraction service - main processing orchestration
 """
 
 import logging
+import time
+import uuid
 
 from database import (
     get_job, update_job, update_page,
@@ -13,6 +15,7 @@ from core import detect_with_roboflow, ocr_schedule_with_claude, extract_elevati
 from geometry import calculate_real_measurements
 from geometry.area import compute_detection_area_sf, compute_detection_perimeter_lf
 from services.detection_postprocess import postprocess_detections
+from services.detection_normalization import normalize_detection_class
 from config import config
 from utils.scale import get_safe_scale_ratio, get_safe_dpi
 import datetime
@@ -32,7 +35,7 @@ def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
         dpi: DPI of the image
     """
     if not predictions:
-        return 0
+        return 0, []
     
     # Calculate pixels to real units conversion
     # At 200 DPI and 1/4"=1' (scale_ratio=48): 1 pixel = 0.24 inches real
@@ -40,8 +43,9 @@ def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
     inches_per_pixel = scale_ratio / safe_dpi
     
     inserted = 0
+    inserted_records = []
     for idx, pred in enumerate(predictions):
-        detection_class = (pred.get('class') or '').lower().strip() or 'unknown'
+        detection_class = normalize_detection_class(pred.get('class')) or 'unknown'
         
         # Roboflow returns center x,y - store as center (frontend converts)
         pixel_x = pred.get('x', 0)
@@ -111,7 +115,87 @@ def _insert_detections(job_id, page_id, predictions, scale_ratio, dpi):
         result = supabase_request('POST', 'extraction_detection_details', detection_record)
         if result:
             inserted += 1
+            if isinstance(result, list):
+                inserted_records.extend(result)
+            else:
+                inserted_records.append(result)
     
+    return inserted, inserted_records
+
+
+def _seed_draft_detections_for_page(job_id, page_id, detail_rows=None):
+    """
+    Copy AI detections into the editor draft table when a page has no drafts yet.
+
+    The Detection Editor saves all user changes to extraction_detections_draft.
+    Roboflow's first-pass detections land in extraction_detection_details, so this
+    initializer gives the editor a real editable layer without overwriting manual
+    edits on subsequent retries.
+    """
+    existing_drafts = supabase_request('GET', 'extraction_detections_draft', filters={
+        'page_id': f'eq.{page_id}',
+        'select': 'id',
+        'limit': '1'
+    }) or []
+    if existing_drafts:
+        return 0
+
+    detail_rows = detail_rows or supabase_request('GET', 'extraction_detection_details', filters={
+        'page_id': f'eq.{page_id}',
+        'status': 'neq.deleted',
+        'order': 'detection_index.asc'
+    }) or []
+    if not detail_rows:
+        return 0
+
+    draft_rows = []
+    for detail in detail_rows:
+        draft_rows.append({
+            'id': str(uuid.uuid4()),
+            'job_id': job_id,
+            'page_id': page_id,
+            'source_detection_id': detail.get('id'),
+            'class': detail.get('class'),
+            'pixel_x': detail.get('pixel_x'),
+            'pixel_y': detail.get('pixel_y'),
+            'pixel_width': detail.get('pixel_width'),
+            'pixel_height': detail.get('pixel_height'),
+            'confidence': detail.get('confidence'),
+            'detection_index': detail.get('detection_index'),
+            'matched_tag': detail.get('matched_tag'),
+            'is_triangle': detail.get('is_triangle') or False,
+            'assigned_material_id': None,
+            'material_notes': None,
+            'is_deleted': False,
+            'is_user_created': False,
+            'polygon_points': detail.get('polygon_points'),
+            'markup_type': detail.get('markup_type') or 'polygon',
+            'status': detail.get('status') or 'auto',
+            'area_sf': detail.get('area_sf'),
+            'perimeter_lf': detail.get('perimeter_lf'),
+            'item_count': detail.get('item_count') or 1,
+        })
+
+    inserted = 0
+    batch_size = 50
+    for i in range(0, len(draft_rows), batch_size):
+        batch = draft_rows[i:i + batch_size]
+        result = None
+        for attempt in range(3):
+            result = supabase_request('POST', 'extraction_detections_draft', batch)
+            if result:
+                break
+            if attempt < 2:
+                time.sleep(1)
+        if result:
+            inserted += len(result) if isinstance(result, list) else len(batch)
+        else:
+            print(
+                f"[{job_id}] Failed to seed draft detections for page {page_id} "
+                f"batch {i // batch_size + 1}",
+                flush=True
+            )
+
     return inserted
 
 
@@ -129,7 +213,7 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
     7. Build cross-references
     """
     try:
-        update_job(job_id, {'status': 'processing'})
+        update_job(job_id, {'status': 'processing', 'error_message': None})
         
         # Get job info
         job = get_job(job_id)
@@ -144,12 +228,32 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
         pages = get_classified_pages(job_id)
         if not pages:
             print(f"[{job_id}] No classified pages to process", flush=True)
+            update_job(job_id, {
+                'status': 'failed',
+                'error_message': 'No classified pages were available for detection. Review and approve page types first.'
+            })
             return
         
         print(f"[{job_id}] Processing {len(pages)} pages...", flush=True)
         
-        elevation_pages = [p for p in pages if p.get('page_type') == 'elevation']
+        detection_page_types = set(config.ROBOFLOW_PAGE_TYPES or ['elevation'])
+        detection_pages = [
+            p for p in pages
+            if (p.get('page_type') or '').lower() in detection_page_types
+        ]
         schedule_pages = [p for p in pages if p.get('page_type') == 'schedule']
+
+        if not detection_pages:
+            page_type_list = ', '.join(sorted(detection_page_types))
+            print(f"[{job_id}] No pages selected for Roboflow detection", flush=True)
+            update_job(job_id, {
+                'status': 'failed',
+                'error_message': (
+                    'No pages were selected for Roboflow detection. '
+                    f'Review and approve at least one page with type: {page_type_list}.'
+                )
+            })
+            return
         
         totals = {
             'total_net_siding_sqft': 0,
@@ -159,9 +263,10 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
             'total_detections': 0
         }
         processed = 0
+        detection_failures = []
         
-        # Process elevation pages
-        for page in elevation_pages:
+        # Process pages configured for Roboflow object detection.
+        for page in detection_pages:
             page_id = page.get('id')
             image_url = page.get('image_url')
             
@@ -201,7 +306,7 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
                           f"contained={pp_stats['containment_filtered']}, garage_merge={pp_stats['doors_merged_to_garages']}", flush=True)
 
                 # INSERT DETECTIONS INTO DATABASE (post-processed)
-                inserted_count = _insert_detections(job_id, page_id, predictions, scale_ratio, dpi)
+                inserted_count, inserted_records = _insert_detections(job_id, page_id, predictions, scale_ratio, dpi)
                 totals['total_detections'] += inserted_count
                 print(f"[{job_id}] Inserted {inserted_count} detections for page {page_id}", flush=True)
                 
@@ -217,6 +322,7 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
                 # Update page
                 update_page(page_id, {
                     'status': 'complete',
+                    'error_message': None,
                     'extraction_data': {
                         'measurements': measurements,
                         'raw_predictions': predictions
@@ -240,8 +346,17 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
                     print(f"[{job_id}] OCR failed for page {page_id}: {ocr_err}", flush=True)
                     # Don't fail the whole extraction if OCR fails
             else:
-                print(f"[{job_id}] Detection failed for page {page_id}: {detection.get('error')}", flush=True)
-                update_page(page_id, {'status': 'failed'})
+                detection_error = detection.get('error') or 'Roboflow detection failed.'
+                detection_failures.append({
+                    'page_id': page_id,
+                    'page_number': page.get('page_number'),
+                    'error': detection_error
+                })
+                print(f"[{job_id}] Detection failed for page {page_id}: {detection_error}", flush=True)
+                update_page(page_id, {
+                    'status': 'failed',
+                    'error_message': detection_error
+                })
             
             processed += 1
             update_job(job_id, {'pages_processed': processed})
@@ -257,24 +372,100 @@ def process_job_background(job_id, scale_override=None, generate_markups=True):
             if 'error' not in schedule_data:
                 update_page(page_id, {
                     'status': 'complete',
+                    'error_message': None,
                     'extraction_data': schedule_data
                 })
                 print(f"[{job_id}] Extracted schedule: {len(schedule_data.get('windows', []))} windows, {len(schedule_data.get('doors', []))} doors", flush=True)
             else:
-                print(f"[{job_id}] Schedule extraction failed: {schedule_data.get('error')}", flush=True)
-                update_page(page_id, {'status': 'failed'})
+                schedule_error = schedule_data.get('error') or 'Schedule extraction failed.'
+                print(f"[{job_id}] Schedule extraction failed: {schedule_error}", flush=True)
+                update_page(page_id, {
+                    'status': 'failed',
+                    'error_message': schedule_error
+                })
             
             processed += 1
             update_job(job_id, {'pages_processed': processed})
         
         # Skip other page types
         for page in pages:
-            if page.get('page_type') not in ['elevation', 'schedule']:
-                update_page(page.get('id'), {'status': 'skipped'})
+            if page.get('page_type') != 'schedule' and (page.get('page_type') or '').lower() not in detection_page_types:
+                update_page(page.get('id'), {
+                    'status': 'skipped',
+                    'error_message': None
+                })
+
+        if detection_failures:
+            totals['detection_errors'] = detection_failures
+
+        if detection_failures and len(detection_failures) == len(detection_pages) and totals['total_detections'] == 0:
+            first_error = detection_failures[0].get('error') or 'Roboflow detection failed.'
+            error_message = (
+                f"Roboflow detection failed for all {len(detection_pages)} detection pages: "
+                f"{first_error}"
+            )
+            print(f"[{job_id}] {error_message}", flush=True)
+            update_job(job_id, {
+                'status': 'failed',
+                'error_message': error_message,
+                'results_summary': totals,
+                'total_detections': totals['total_detections']
+            })
+            return
+
+        partial_error_message = None
+        if detection_failures:
+            partial_error_message = (
+                f"Roboflow detection failed for {len(detection_failures)} of "
+                f"{len(detection_pages)} detection pages."
+            )
+
+        if config.REFINEMENT_AUTO_ENABLED:
+            try:
+                from services.job_refinement_service import refine_job_detections
+                print(f"[{job_id}] Refining detections before editor handoff...", flush=True)
+                update_job(job_id, {'status': 'refining'})
+                refinement_summary = refine_job_detections(
+                    job_id,
+                    mode='auto',
+                    page_ids=[p.get('id') for p in detection_pages if p.get('id')],
+                    set_job_status=False,
+                )
+                totals['refinement'] = {
+                    'pages_processed': refinement_summary.get('pages_processed'),
+                    'pages_refined': refinement_summary.get('pages_refined'),
+                    'pages_seeded_from_refined': refinement_summary.get('pages_seeded_from_refined'),
+                    'pages_seeded_from_raw': refinement_summary.get('pages_seeded_from_raw'),
+                    'applied_actions': refinement_summary.get('applied_actions'),
+                    'blocked_actions': refinement_summary.get('blocked_actions'),
+                    'review_flags': refinement_summary.get('review_flags'),
+                    'storage_available': refinement_summary.get('storage_available'),
+                    'openai_available': refinement_summary.get('openai_available'),
+                }
+                print(
+                    f"[{job_id}] Refinement complete: "
+                    f"{refinement_summary.get('pages_refined', 0)} page(s) refined, "
+                    f"{refinement_summary.get('pages_seeded_from_refined', 0)} seeded from refined, "
+                    f"{refinement_summary.get('pages_seeded_from_raw', 0)} seeded from raw",
+                    flush=True,
+                )
+            except Exception as refinement_err:
+                print(f"[{job_id}] Refinement failed; seeding raw detections: {refinement_err}", flush=True)
+                totals['refinement_error'] = str(refinement_err)
+                raw_seeded = 0
+                for page in detection_pages:
+                    raw_seeded += _seed_draft_detections_for_page(job_id, page.get('id'))
+                totals['raw_draft_seeded_after_refinement_error'] = raw_seeded
+        else:
+            raw_seeded = 0
+            for page in detection_pages:
+                raw_seeded += _seed_draft_detections_for_page(job_id, page.get('id'))
+            totals['raw_draft_seeded'] = raw_seeded
         
         # Update job with totals
         update_job(job_id, {
             'status': 'complete',
+            'error_message': partial_error_message,
             'results_summary': totals,
             'total_detections': totals['total_detections']
         })

@@ -10,8 +10,10 @@ This is the main Flask entry point. All business logic is in modules:
 - utils/: Validation and utilities
 """
 
+import hmac
 import threading
-from flask import Flask, request, jsonify
+import uuid
+from flask import Flask, g, request, jsonify
 from flask_cors import CORS
 
 from config import config
@@ -23,6 +25,7 @@ from database import (
 from core import claude_client
 from geometry import parse_scale_notation
 from utils.scale import get_safe_scale_ratio
+from utils.request_auth import verify_signed_request
 
 
 # ============================================================
@@ -31,6 +34,86 @@ from utils.scale import get_safe_scale_ratio
 
 app = Flask(__name__)
 CORS(app, origins=config.CORS_ORIGINS)
+
+
+# ============================================================
+# INBOUND AUTHENTICATION
+# ============================================================
+
+# Paths that never require a key (health checks, monitoring)
+AUTH_EXEMPT_PATHS = {'/health'}
+
+if not config.EXTRACTION_API_KEY and not config.EXTRACTION_REQUIRE_SIGNED_REQUESTS:
+    print(
+        "[Auth] WARNING: EXTRACTION_API_KEY is not set — this API is running "
+        "without inbound authentication. Configure API-key or signed-request "
+        "authentication before exposing it publicly.",
+        flush=True
+    )
+
+if config.EXTRACTION_REQUIRE_SIGNED_REQUESTS and not config.EXTRACTION_API_SIGNING_SECRET:
+    print(
+        "[Auth] ERROR: signed requests are required but "
+        "EXTRACTION_API_SIGNING_SECRET is not configured.",
+        flush=True
+    )
+
+
+@app.before_request
+def require_api_key():
+    """
+    Env-gated API-key auth. When EXTRACTION_API_KEY is configured, every
+    request must carry a matching X-API-Key header. Exemptions: /health
+    (Railway health checks) and OPTIONS requests (CORS preflight).
+    When the env var is unset, requests pass through unchanged.
+    """
+    if request.method == 'OPTIONS':
+        return None
+    if request.path in AUTH_EXEMPT_PATHS:
+        return None
+
+    g.request_id = request.headers.get('X-Estimate-Request-Id') or str(uuid.uuid4())
+
+    if config.EXTRACTION_API_KEY:
+        provided_key = request.headers.get('X-API-Key') or ''
+        if not hmac.compare_digest(provided_key, config.EXTRACTION_API_KEY):
+            return jsonify({"error": "Unauthorized"}), 401
+
+    if config.EXTRACTION_REQUIRE_SIGNED_REQUESTS:
+        if not config.EXTRACTION_API_SIGNING_SECRET:
+            return jsonify({"error": "Service authentication is not configured"}), 503
+
+        path = request.full_path[:-1] if request.full_path.endswith('?') else request.full_path
+        valid, reason, claims = verify_signed_request(
+            method=request.method,
+            path=path,
+            body=request.get_data(cache=True),
+            headers=request.headers,
+            secret=config.EXTRACTION_API_SIGNING_SECRET,
+            max_age_seconds=config.EXTRACTION_SIGNED_REQUEST_MAX_AGE_SECONDS,
+        )
+        if not valid or claims is None:
+            print(f"[Auth] Rejected request {g.request_id}: {reason}", flush=True)
+            return jsonify({"error": "Unauthorized"}), 401
+        g.estimate_claims = claims
+        g.request_id = claims.request_id
+    return None
+
+
+@app.after_request
+def add_request_metadata(response):
+    request_id = getattr(g, 'request_id', None)
+    if request_id:
+        response.headers['X-Request-Id'] = request_id
+    claims = getattr(g, 'estimate_claims', None)
+    print(
+        f"[Request] id={request_id or '-'} method={request.method} "
+        f"path={request.path} status={response.status_code} "
+        f"user={getattr(claims, 'user_id', '-')} "
+        f"organization={getattr(claims, 'organization_id', '-')}",
+        flush=True
+    )
+    return response
 
 
 # ============================================================
@@ -96,11 +179,16 @@ def start_job():
     from services.pdf_service import convert_pdf_background
     
     data = request.json
-    if not data.get('pdf_url') or not data.get('project_id'):
-        return jsonify({"error": "pdf_url and project_id required"}), 400
+    if not data.get('pdf_url') or not data.get('project_id') or not data.get('organization_id'):
+        return jsonify({"error": "pdf_url, project_id, and organization_id required"}), 400
+
+    claims = getattr(g, 'estimate_claims', None)
+    if claims and data['organization_id'] != claims.organization_id:
+        return jsonify({"error": "Organization mismatch"}), 403
     
     job = create_job({
         'project_id': data['project_id'],
+        'organization_id': data['organization_id'],
         'project_name': data.get('project_name', ''),
         'source_pdf_url': data['pdf_url'],
         'status': 'pending',
@@ -341,6 +429,81 @@ def process_job():
     ).start()
 
     return jsonify({"success": True, "job_id": data['job_id'], "status": "processing"})
+
+
+@app.route('/refine-detections', methods=['POST'])
+def refine_detections():
+    """
+    Run a second-pass vision QA/refinement pass for one page of draft detections.
+
+    Body:
+      page_id: required extraction_pages.id
+      apply: optional bool, defaults False. False returns a safe preview only.
+      classes: optional list of classes to allow the model to alter.
+      detection_ids: optional list of specific draft detections to alter.
+    """
+    from services.detection_refinement_service import refine_page_detections
+
+    data = request.json or {}
+    page_id = data.get('page_id')
+    if not page_id:
+        return jsonify({"success": False, "error": "page_id required"}), 400
+
+    result, status_code = refine_page_detections(
+        page_id=page_id,
+        apply=bool(data.get('apply', False)),
+        requested_classes=data.get('classes'),
+        detection_ids=data.get('detection_ids'),
+        proposed_actions=data.get('actions'),
+    )
+    return jsonify(result), status_code
+
+
+@app.route('/refine-job', methods=['POST'])
+def refine_job():
+    """
+    Run the automatic pre-editor refinement pass for a job.
+
+    Body:
+      job_id: required extraction_jobs.id
+      mode: optional "auto" or "rerun"
+      page_ids: optional list of page ids to refine
+    """
+    from services.job_refinement_service import refine_job_detections
+
+    data = request.json or {}
+    job_id = data.get('job_id')
+    if not job_id:
+        return jsonify({"success": False, "error": "job_id required"}), 400
+
+    mode = data.get('mode') or 'auto'
+    if mode not in {'auto', 'rerun'}:
+        return jsonify({"success": False, "error": "mode must be auto or rerun"}), 400
+
+    page_ids = data.get('page_ids')
+    if page_ids is not None and not isinstance(page_ids, list):
+        return jsonify({"success": False, "error": "page_ids must be a list"}), 400
+
+    result = refine_job_detections(job_id, mode=mode, page_ids=page_ids, set_job_status=True)
+    status_code = 200 if result.get('success') else 404
+    return jsonify(result), status_code
+
+
+@app.route('/cleanup-facade-overlaps', methods=['POST'])
+def cleanup_facade_overlaps_endpoint():
+    """Clean existing duplicate/overlapping facade draft detections for one page."""
+    from services.detection_refinement_service import cleanup_facade_overlaps
+
+    data = request.json or {}
+    page_id = data.get('page_id')
+    if not page_id:
+        return jsonify({"success": False, "error": "page_id required"}), 400
+
+    summary = cleanup_facade_overlaps(
+        page_id=page_id,
+        apply=bool(data.get('apply', False)),
+    )
+    return jsonify({"success": True, "page_id": page_id, "cleanup": summary})
 
 
 # ============================================================
@@ -875,7 +1038,7 @@ def _store_ocr_results(page_id, ocr_result):
         'average_wall_height_ft': ocr_result.get('average_wall_height_ft'),
         'total_building_height_ft': ocr_result.get('total_building_height_ft'),
         'extraction_confidence': ocr_result.get('extraction_confidence'),
-        'claude_model': 'claude-sonnet-4-20250514',
+        'claude_model': config.CLAUDE_MODEL,
         'processing_time_ms': ocr_result.get('processing_time_ms')
     }
     
@@ -1401,8 +1564,10 @@ def debug_markup():
             "url": markup_url
         })
     except Exception as e:
+        print(f"[Debug Markup] Error: {e}", flush=True)
         import traceback
-        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+        traceback.print_exc()
+        return jsonify({"error": "Internal error"}), 500
 
 
 @app.route('/test-markup', methods=['POST'])
@@ -1437,8 +1602,10 @@ def test_markup():
             "first_prediction": predictions[0] if predictions else None
         })
     except Exception as e:
+        print(f"[Test Markup] Error: {e}", flush=True)
         import traceback
-        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+        traceback.print_exc()
+        return jsonify({"error": "Internal error"}), 500
 
 
 # ============================================================
@@ -2214,7 +2381,7 @@ def import_bluebeam_fresh_preview_endpoint():
         print(f"[Import Bluebeam Preview] Error: {e}", flush=True)
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Internal error'}), 500
 
 
 @app.route('/import-bluebeam-fresh', methods=['POST'])
@@ -2233,7 +2400,7 @@ def import_bluebeam_fresh_endpoint():
             - pdf_file: The annotated PDF file (file upload, required)
             - project_id: UUID of the project (form field, required)
             - project_name: Display name for the project (form field, optional)
-            - organization_id: Organization UUID for multi-tenant (form field, optional)
+            - organization_id: Organization UUID for multi-tenant (form field, required)
             - class_mapping: JSON string mapping subjects to classes (form field, optional)
                              Example: {"7\" Reveal Siding": "siding", "Length Measurement": "SKIP"}
 
@@ -2271,8 +2438,15 @@ def import_bluebeam_fresh_endpoint():
     class_mapping_str = request.form.get('class_mapping', '')
     bluebeam_project_id = request.form.get('bluebeam_project_id', '')
 
-    if not project_id:
-        return jsonify({'success': False, 'error': 'project_id is required'}), 400
+    if not project_id or not organization_id:
+        return jsonify({
+            'success': False,
+            'error': 'project_id and organization_id are required'
+        }), 400
+
+    claims = getattr(g, 'estimate_claims', None)
+    if claims and organization_id != claims.organization_id:
+        return jsonify({'success': False, 'error': 'Organization mismatch'}), 403
 
     # Parse class mapping if provided
     subject_class_map = None
@@ -2319,7 +2493,7 @@ def import_bluebeam_fresh_endpoint():
         print(f"[Import Bluebeam Fresh] Error: {e}", flush=True)
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'Internal error'}), 500
 
 
 # ============================================================
@@ -2458,7 +2632,12 @@ def update_page_classification(page_id):
     old_page_type = page.get('page_type')
 
     # Update the page
-    update_data = {'page_type': page_type}
+    update_data = {
+        'page_type': page_type,
+        'page_type_confidence': 1,
+        'status': 'classified',
+        'error_message': None
+    }
 
     # Clear elevation_name if changing away from elevation
     if page_type != 'elevation' and old_page_type == 'elevation':
@@ -2469,7 +2648,7 @@ def update_page_classification(page_id):
         return jsonify({'success': False, 'error': 'Failed to update page'}), 500
 
     # Recalculate elevation count for the job
-    elevation_pages = get_elevation_pages(job_id)
+    elevation_pages = get_elevation_pages(job_id, status=None)
     elevation_count = len(elevation_pages) if elevation_pages else 0
 
     # Update job's elevation_count

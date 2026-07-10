@@ -883,7 +883,7 @@ POINT_MARKER_CLASSES = {
 # Import paths never persist real_*_ft, so these are derived on read via
 # derive_real_dimensions_ft() (see services/detection_normalization.py).
 DIMENSION_LF_CLASSES = {
-    'building', 'exterior_wall', 'window', 'door', 'garage', 'garage_door',
+    'building', 'exterior_wall', 'siding', 'window', 'door', 'garage', 'garage_door',
     'outside_corner', 'inside_corner'
 }
 
@@ -926,21 +926,27 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
     }) or []
     pages_by_id = {p['id']: p for p in pages if p.get('id')}
 
-    # 1c. Facade layer selection: jobs marked up with per-wall-section
-    # 'exterior wall' areas also carry page-level 'building' outlines that
-    # OVERLAP them — summing both double-counts the facade (MN568: 8,437
-    # building + 3,697 exterior wall = 12,134 vs known-good 3,697).
-    # Known-good approve payloads use the exterior-wall layer when present.
+    # 1c. Facade layer selection. A job can carry page-level building outlines,
+    # gross exterior-wall sections, and siding/material polygons at once. Those
+    # layers overlap and must never be collapsed or summed together.
+    normalized_classes = {
+        normalize_detection_class(d.get('class')) for d in detections
+    }
     facade_class = 'building'
-    if any(normalize_detection_class(d.get('class')) == 'exterior_wall' for d in detections):
+    if 'exterior_wall' in normalized_classes:
         facade_class = 'exterior_wall'
+    elif 'siding' in normalized_classes:
+        facade_class = 'siding'
+
+    if facade_class != 'building':
         excluded_outlines = sum(
             1 for d in detections
-            if normalize_detection_class(d.get('class')) == 'building'
+            if normalize_detection_class(d.get('class')) != facade_class
+            and normalize_detection_class(d.get('class')) in {'building', 'exterior_wall', 'siding'}
         )
         if excluded_outlines:
-            print(f"[Bluebeam Recalc] Facade layer = exterior_wall; excluding "
-                  f"{excluded_outlines} overlapping building outline(s) from facade totals",
+            print(f"[Bluebeam Recalc] Facade layer = {facade_class}; excluding "
+                  f"{excluded_outlines} overlapping facade-layer row(s) from totals",
                   flush=True)
 
     # 2. Initialize aggregation buckets
@@ -987,6 +993,7 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
     detection_counts = {}  # For point markers
     material_assignments = []
     corner_rows_seen = False  # Whether ANY corner-class rows exist in draft
+    unmapped_classes = {}  # class name -> count of detections not aggregated
 
     # 3. Aggregate by class
     for det in detections:
@@ -1001,7 +1008,7 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
         qty = int(det.get('item_count') or 1)
 
         needs_dims = cls in DIMENSION_LF_CLASSES and (
-            cls not in ('building', 'exterior_wall') or cls == facade_class
+            cls not in ('building', 'exterior_wall', 'siding') or cls == facade_class
         )
         if needs_dims:
             width_ft, height_ft, _dim_source = derive_real_dimensions_ft(
@@ -1015,7 +1022,7 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
             facade['perimeter_lf'] += width_ft  # Bottom edge = starter
             facade['level_starter_lf'] += width_ft
 
-        elif cls in ('building', 'exterior_wall'):
+        elif cls in ('building', 'exterior_wall', 'siding'):
             # The non-facade layer (overlapping outlines) — excluded from
             # facade totals; see facade_class selection above
             pass
@@ -1079,6 +1086,13 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
             detection_counts[cls]['total_sf'] += area
             detection_counts[cls]['total_lf'] += perim
 
+        else:
+            # Unrecognized class: previously dropped silently (audit fix).
+            # Collect for the payload's 'unmapped_classes' key; a warning
+            # per class is printed after the loop.
+            unmapped_key = cls or '(empty)'
+            unmapped_classes[unmapped_key] = unmapped_classes.get(unmapped_key, 0) + qty
+
         # Collect material assignments
         if det.get('assigned_material_id'):
             material_assignments.append({
@@ -1088,6 +1102,13 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
                 'quantity': area if area > 0 else 1,
                 'unit': 'SF' if area > 0 else 'EA'
             })
+
+    # 3a. Surface unmapped classes — these detections are NOT included in
+    # any measurement bucket, so downstream (n8n) must be able to see them
+    for unmapped_cls, unmapped_count in unmapped_classes.items():
+        print(f"[Bluebeam Recalc] WARNING: detection class '{unmapped_cls}' "
+              f"({unmapped_count} item(s)) is not mapped to any aggregation "
+              f"bucket — excluded from measurements", flush=True)
 
     # 3b. Corner fallback: jobs whose corners were counted by floor-plan
     # analysis (or imported before corner markup parsing) have NO corner
@@ -1175,6 +1196,11 @@ def aggregate_detections_for_recalc(job_id: str) -> Dict[str, Any]:
         'detection_counts': detection_counts,
         'total_point_count': total_point_count
     }
+
+    # Only attach when non-empty so existing payload consumers see no change
+    # on fully-mapped jobs
+    if unmapped_classes:
+        payload['unmapped_classes'] = unmapped_classes
 
     print(f"[Bluebeam Recalc] Aggregation complete: facade={facade['net_siding_sf']} SF, "
           f"windows={windows['count']}, doors={doors['count']}, garages={garages['count']}", flush=True)

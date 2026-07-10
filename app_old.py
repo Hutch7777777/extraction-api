@@ -31,8 +31,8 @@ app = Flask(__name__)
 CORS(app)
 
 # Configuration from environment
-COHERE_API_KEY = os.environ.get('COHERE_API_KEY', 'dp40w3rEh3EJMuKMs4thgcnVo2MZq0CfNgvb0Eus')
-ROBOFLOW_API_KEY = os.environ.get('ROBOFLOW_API_KEY', 'K4sXaOf0Ws3Po4e65Xni')
+COHERE_API_KEY = os.environ.get('COHERE_API_KEY')
+ROBOFLOW_API_KEY = os.environ.get('ROBOFLOW_API_KEY')
 ROBOFLOW_MODEL = os.environ.get('ROBOFLOW_MODEL', 'architectural-detail-detection/1')
 SUPABASE_URL = os.environ.get('SUPABASE_URL', 'https://okwtyttfqbfmcqtenize.supabase.co')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
