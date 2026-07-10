@@ -42,10 +42,11 @@ class TestNormalizeDetectionClass(unittest.TestCase):
         self.assertEqual(normalize_detection_class('  inside corner  '), INSIDE_CORNER)
         self.assertEqual(normalize_detection_class('Corner Outside'), OUTSIDE_CORNER)
 
-    def test_non_corner_classes_pass_through_cleaned(self):
+    def test_common_classes_and_aliases_normalize(self):
         self.assertEqual(normalize_detection_class('window'), 'window')
-        self.assertEqual(normalize_detection_class('Garage Door'), 'garage_door')
+        self.assertEqual(normalize_detection_class('Garage Door'), 'garage')
         self.assertEqual(normalize_detection_class('Exterior Wall'), 'exterior_wall')
+        self.assertEqual(normalize_detection_class('Siding'), 'siding')
 
     def test_empty_and_none(self):
         self.assertEqual(normalize_detection_class(None), '')

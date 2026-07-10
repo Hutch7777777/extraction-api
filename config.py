@@ -10,17 +10,87 @@ load_dotenv()
 
 class Config:
     """Application configuration"""
+
+    @staticmethod
+    def _parse_csv(value, default=None):
+        source = value if value is not None else default
+        if not source:
+            return []
+        return [item.strip().lower() for item in source.split(',') if item.strip()]
     
     # Flask
     DEBUG = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
     PORT = int(os.getenv('PORT', 5050))
+
+    # Inbound API authentication — when set, all requests (except /health
+    # and CORS preflight OPTIONS) must send a matching X-API-Key header.
+    # When unset, the API runs unauthenticated (a startup warning is logged).
+    EXTRACTION_API_KEY = (os.getenv('EXTRACTION_API_KEY') or '').strip() or None
+    EXTRACTION_API_SIGNING_SECRET = (
+        os.getenv('EXTRACTION_API_SIGNING_SECRET') or ''
+    ).strip() or None
+    EXTRACTION_SIGNED_REQUEST_MAX_AGE_SECONDS = int(
+        os.getenv('EXTRACTION_SIGNED_REQUEST_MAX_AGE_SECONDS', '300')
+    )
+    _running_on_railway = bool(
+        os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('RAILWAY_ENVIRONMENT_ID')
+    )
+    EXTRACTION_REQUIRE_SIGNED_REQUESTS = os.getenv(
+        'EXTRACTION_REQUIRE_SIGNED_REQUESTS',
+        'true' if _running_on_railway else 'false'
+    ).lower() == 'true'
+
+    # Authenticated callback into the n8n calculation pipeline. The same
+    # secret is configured on n8n's Header Auth credential.
+    N8N_WEBHOOK_URL = (
+        os.getenv('N8N_WEBHOOK_URL')
+        or 'https://n8n-production-293e.up.railway.app'
+    ).strip().rstrip('/')
+    N8N_WEBHOOK_SECRET = (os.getenv('N8N_WEBHOOK_SECRET') or '').strip() or None
     
     # External APIs
-    ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
-    ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
-    ROBOFLOW_WORKFLOW_URL = os.getenv(
-        'ROBOFLOW_WORKFLOW_URL',
-        "https://serverless.roboflow.com/infer/workflows/exterior-finishes/find-windows-garages-exterior-walls-roofs-buildings-doors-and-gables"
+    ROBOFLOW_API_KEY = (os.getenv('ROBOFLOW_API_KEY') or '').strip() or None
+    ANTHROPIC_API_KEY = (os.getenv('ANTHROPIC_API_KEY') or '').strip() or None
+    CLAUDE_MODEL = os.getenv('CLAUDE_MODEL') or os.getenv('ANTHROPIC_MODEL') or 'claude-sonnet-4-6'
+    OPENAI_API_KEY = (os.getenv('OPENAI_API_KEY') or '').strip() or None
+    OPENAI_REFINEMENT_MODEL = (
+        os.getenv('OPENAI_REFINEMENT_MODEL')
+        or os.getenv('OPENAI_VISION_MODEL')
+        or 'gpt-5.5'
+    )
+    OPENAI_REFINEMENT_MAX_OUTPUT_TOKENS = int(os.getenv('OPENAI_REFINEMENT_MAX_OUTPUT_TOKENS', '12000'))
+    REFINEMENT_MAX_FACADE_OVERLAP_RATIO = float(os.getenv('REFINEMENT_MAX_FACADE_OVERLAP_RATIO', '0.03'))
+    REFINEMENT_CONTEXT_PAGE_TYPES = _parse_csv.__func__(
+        os.getenv('REFINEMENT_CONTEXT_PAGE_TYPES'),
+        'roof_plan,floor_plan'
+    )
+    REFINEMENT_MAX_CONTEXT_PAGES = int(os.getenv('REFINEMENT_MAX_CONTEXT_PAGES', '4'))
+    REFINEMENT_AUTO_ENABLED = os.getenv('REFINEMENT_AUTO_ENABLED', 'true').lower() == 'true'
+    REFINEMENT_AUTO_CLASSES = _parse_csv.__func__(
+        os.getenv('REFINEMENT_AUTO_CLASSES'),
+        'exterior_wall,gable'
+    )
+    REFINEMENT_ENABLE_RETURN_PLANE_EXPANSION = os.getenv(
+        'REFINEMENT_ENABLE_RETURN_PLANE_EXPANSION',
+        'false'
+    ).lower() == 'true'
+    ROBOFLOW_INFERENCE_MODE = (os.getenv('ROBOFLOW_INFERENCE_MODE') or 'workflow').strip().lower()
+    ROBOFLOW_SERVERLESS_URL = (os.getenv('ROBOFLOW_SERVERLESS_URL') or 'https://serverless.roboflow.com').strip().rstrip('/')
+    ROBOFLOW_MODEL_ID = (
+        (os.getenv('ROBOFLOW_MODEL_ID') or os.getenv('ROBOFLOW_MODEL') or '').strip()
+        or None
+    )
+    ROBOFLOW_WORKFLOW_URL = (
+        (os.getenv('ROBOFLOW_WORKFLOW_URL') or '').strip()
+        or "https://serverless.roboflow.com/infer/workflows/exterior-finishes/find-windows-garages-exterior-walls-roofs-buildings-doors-and-gables"
+    )
+    ROBOFLOW_CONFIDENCE = float(os.getenv('ROBOFLOW_CONFIDENCE', '0.40'))
+    ROBOFLOW_OVERLAP = float(os.getenv('ROBOFLOW_OVERLAP', '0.30'))
+    ROBOFLOW_MAX_DETECTIONS = int(os.getenv('ROBOFLOW_MAX_DETECTIONS', '300'))
+    ROBOFLOW_PAGE_TYPES = _parse_csv.__func__(os.getenv('ROBOFLOW_PAGE_TYPES'), 'elevation')
+    ROBOFLOW_ALLOWED_CLASSES = _parse_csv.__func__(
+        os.getenv('ROBOFLOW_ALLOWED_CLASSES'),
+        'window,door,garage,building,exterior_wall,roof,gable'
     )
     
     # Supabase
@@ -49,7 +119,6 @@ class Config:
         'door': (255, 140, 0),
         'garage': (148, 0, 211),
         'building': (34, 139, 34),
-        'exterior wall': (34, 139, 34),
         'exterior_wall': (34, 139, 34),
         'roof': (220, 20, 60),
         'gable': (255, 105, 180),
@@ -58,12 +127,12 @@ class Config:
     
     # Trade groups for filtering
     TRADE_GROUPS = {
-        'siding': ['building', 'exterior wall', 'window', 'door', 'garage'],
+        'siding': ['building', 'exterior_wall', 'window', 'door', 'garage'],
         'roofing': ['roof', 'gable'],
         'windows': ['window'],
         'doors': ['door', 'garage'],
         'gutters': ['roof'],
-        'all': ['window', 'door', 'garage', 'building', 'exterior wall', 'roof', 'gable']
+        'all': ['window', 'door', 'garage', 'building', 'exterior_wall', 'roof', 'gable']
     }
 
     # ==========================================
@@ -89,7 +158,6 @@ class Config:
         'garage': {'width': 80, 'height': 50},
         'gable': {'width': 40, 'height': 25},
         'building': {'width': 100, 'height': 100},
-        'exterior wall': {'width': 50, 'height': 30},
         'exterior_wall': {'width': 50, 'height': 30},
         'roof': {'width': 80, 'height': 40},
         'default': {'width': 20, 'height': 20}  # Fallback for unknown classes

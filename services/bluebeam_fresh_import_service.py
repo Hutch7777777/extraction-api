@@ -1123,7 +1123,7 @@ def import_bluebeam_fresh(
         pdf_bytes: Raw PDF file bytes
         project_id: UUID of the project to associate with
         project_name: Optional project name for display
-        organization_id: Optional organization ID for multi-tenant
+        organization_id: Required organization ID for tenant ownership
         subject_class_map: Optional mapping of Bluebeam subjects to class names.
                            If a subject maps to 'SKIP', the annotation is skipped.
         bluebeam_project_id: Optional UUID of bluebeam_projects record to link.
@@ -1143,6 +1143,12 @@ def import_bluebeam_fresh(
         return {
             'success': False,
             'error': 'pymupdf not installed. Run: pip install pymupdf'
+        }
+
+    if not organization_id:
+        return {
+            'success': False,
+            'error': 'organization_id is required for a fresh import'
         }
 
     print(f"[Bluebeam Fresh] Starting fresh import for project {project_id}", flush=True)
@@ -1202,6 +1208,7 @@ def import_bluebeam_fresh(
         # 1. Create extraction job
         job_data = {
             'project_id': project_id,
+            'organization_id': organization_id,
             'project_name': project_name or 'Bluebeam Import',
             'status': 'importing',
             'stage': 'uploaded',

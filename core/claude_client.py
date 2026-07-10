@@ -76,7 +76,7 @@ class ClaudeClient:
     def __init__(self):
         self.api_key = config.ANTHROPIC_API_KEY
         self.base_url = "https://api.anthropic.com/v1/messages"
-        self.model = "claude-sonnet-4-20250514"
+        self.model = config.CLAUDE_MODEL
     
     def _make_request(self, image_base64, prompt, max_tokens=1000, media_type="image/png"):
         """Make API request to Claude"""

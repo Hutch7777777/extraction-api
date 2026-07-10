@@ -3,6 +3,7 @@ Job repository - CRUD operations for extraction_jobs
 """
 
 from database.client import supabase_request
+from utils.job_status import validate_job_status
 
 
 def get_job(job_id):
@@ -13,12 +14,18 @@ def get_job(job_id):
 
 def create_job(data):
     """Create new job"""
+    if not data.get('organization_id'):
+        raise ValueError('organization_id is required to create an extraction job')
+    if data.get('status'):
+        validate_job_status(data['status'])
     result = supabase_request('POST', 'extraction_jobs', data)
     return result[0] if result else None
 
 
 def update_job(job_id, updates):
     """Update job by ID"""
+    if updates.get('status'):
+        validate_job_status(updates['status'])
     return supabase_request('PATCH', 'extraction_jobs', updates, {'id': f'eq.{job_id}'})
 
 

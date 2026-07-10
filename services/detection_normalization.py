@@ -38,23 +38,14 @@ import re
 from typing import Dict, Optional, Tuple
 
 from utils.scale import get_safe_dpi
+from utils.detection_classes import (
+    CORNER_CLASSES,
+    INSIDE_CORNER,
+    OUTSIDE_CORNER,
+    normalize_detection_class,
+)
 
 logger = logging.getLogger(__name__)
-
-# Canonical class names for corners
-OUTSIDE_CORNER = 'outside_corner'
-INSIDE_CORNER = 'inside_corner'
-CORNER_CLASSES = {OUTSIDE_CORNER, INSIDE_CORNER}
-
-# Alias → canonical. Keys are post-cleanup (lowercased, underscored), so
-# 'Corner Outside' and 'corner_outside' both resolve through one entry.
-# A bare 'corner' is treated as an outside corner — the fresh import made
-# the same call (CLASS_MAPPING maps 'corner' → outside).
-_CLASS_ALIASES = {
-    'corner': OUTSIDE_CORNER,
-    'corner_outside': OUTSIDE_CORNER,
-    'corner_inside': INSIDE_CORNER,
-}
 
 # Markup types whose pixel geometry is a marker location, not a measured
 # shape (Bluebeam Count markups, floor-plan corner markers).
@@ -74,20 +65,6 @@ MIN_MEANINGFUL_PIXELS = 24
 # the totals.
 MIN_PLAUSIBLE_FT = 0.5
 MAX_PLAUSIBLE_FT = 40.0
-
-
-def normalize_detection_class(raw_class) -> str:
-    """
-    Normalize a detection class name read from the database.
-
-    Lowercases, trims, converts spaces to underscores, then collapses
-    known aliases (currently the corner spellings) to one canonical name.
-    Unknown classes pass through cleaned but unmapped.
-    """
-    if not raw_class:
-        return ''
-    cleaned = str(raw_class).strip().lower().replace(' ', '_')
-    return _CLASS_ALIASES.get(cleaned, cleaned)
 
 
 def _to_float(value) -> float:
